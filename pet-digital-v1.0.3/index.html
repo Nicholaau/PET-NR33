@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0b3a66" />
+  <title>PET Digital NR-33 — DMAE</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Cabeçalho fixo: identifica o app e contém a navegação entre abas. -->
+  <header class="topbar no-print">
+    <div>
+      <strong>PET Digital NR-33</strong>
+      <span>DMAE — Permissão de Entrada e Trabalho para Espaço Confinado</span>
+    </div>
+    <nav>
+      <button type="button" class="ghost" data-tab="formTab">Preencher</button>
+      <button type="button" class="ghost" data-tab="recordsTab">Registros</button>
+      <button type="button" class="ghost" data-tab="verifyTab">Validar</button>
+      <button type="button" class="ghost" data-tab="settingsTab">Chave</button>
+    </nav>
+  </header>
+
+  <!-- Banner controlado pelo Service Worker: aparece quando há nova versão para aplicar. -->
+  <div id="updateBanner" class="update-banner no-print hidden">
+    Nova versão disponível. Salve o que estiver preenchendo antes de atualizar.
+    <button type="button" id="applyUpdate">Atualizar agora</button>
+  </div>
+
+  <main class="container">
+    <!-- Aba principal: formulário completo da PET, validação, finalização e impressão. -->
+    <section id="formTab" class="tab active">
+      <form id="petForm" autocomplete="off">
+        <!-- Bloco visual de identificação institucional e título do documento. -->
+        <section class="card hero">
+          <div class="brand-box brand-logo-box">
+            <img src="logo-dmae-2026.png" alt="DMAE — Prefeitura de Uberlândia" class="brand-logo" />
+          </div>
+          <div>
+            <h1>PET — Permissão de Entrada e Trabalho</h1>
+            <p>Espaço Confinado • NBR 14787 / NR-33 • Revisão 00/2025 • Modelo 01/2025</p>
+          </div>
+        </section>
+
+        <!-- Seção 1: dados gerais que serão coletados para o payload assinado. -->
+        <section class="card">
+          <h2>1. Identificação da PET</h2>
+          <div class="grid cols-2">
+            <label>Nome da unidade
+              <input required name="unidade" placeholder="Ex.: DMAE / Núcleo / Setor" />
+            </label>
+            <label>Data
+              <input required type="date" name="data" />
+            </label>
+          </div>
+          <p class="hint">O número da PET será gerado automaticamente na finalização do registro.</p>
+          <div class="grid cols-3">
+            <label>Local do espaço confinado
+              <input required name="local" placeholder="Endereço, PV, reservatório, elevatória..." />
+            </label>
+            <label>Hora da emissão
+              <input required type="time" name="horaEmissao" />
+            </label>
+            <label>Hora do término previsto
+              <input required type="time" name="horaTermino" />
+            </label>
+          </div>
+          <label>Trabalho a ser realizado
+            <textarea required name="trabalho" rows="3" placeholder="Descreva de forma objetiva o serviço autorizado"></textarea>
+          </label>
+          <div class="grid cols-2">
+            <label>Supervisor de entrada
+              <input required name="supervisorEntrada" placeholder="Nome completo" />
+            </label>
+            <fieldset class="inline-fieldset">
+              <legend>Equipe de salvamento</legend>
+              <label><input type="radio" name="equipeSalvamento" value="Própria" required /> Própria</label>
+              <label><input type="radio" name="equipeSalvamento" value="Corpo de Bombeiro" /> Corpo de Bombeiro</label>
+              <label><input type="radio" name="equipeSalvamento" value="Outra" /> Outra</label>
+              <input name="telefoneSalvamento" placeholder="Telefone / acionamento" value="193" />
+            </fieldset>
+          </div>
+          <div class="grid cols-2">
+            <label>Identificador do equipamento detector
+              <input name="detectorId" placeholder="Nº de série / patrimônio" />
+            </label>
+            <label>Validade/calibração do detector
+              <input type="date" name="detectorCalibracao" />
+            </label>
+          </div>
+          <div class="actions no-print">
+            <button type="button" id="saveDraft" class="secondary">Salvar rascunho</button>
+            <button type="button" id="clearDraft" class="danger ghost">Limpar formulário</button>
+          </div>
+        </section>
+
+        <!-- Seção 2: checklist dinâmico renderizado pelo app.js a partir de checklistItems. -->
+        <section class="card">
+          <h2>2. Itens a serem verificados antes da emissão da PET</h2>
+          <p class="hint">A entrada não deve ser liberada quando houver campo obrigatório sem preenchimento ou resposta que impeça a entrada segura.</p>
+          <div class="table-wrap">
+            <table id="checklistTable" class="checklist-table">
+              <thead>
+                <tr><th>Nº</th><th>Item</th><th>Sim</th><th>Não</th><th>N/A</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- Seção 3: medições de atmosfera, usadas pela validação automática. -->
+        <section class="card">
+          <h2>3. Medições de gases perigosos</h2>
+          <p class="hint">Critérios de liberação adotados no modelo: O₂ entre 19,5% e 23%; inflamável &lt; 10% LIE; H₂S &lt; 5 ppm; CO &lt; 25 ppm.</p>
+          <div class="table-wrap">
+            <table id="gasTable" class="gas-table">
+              <thead>
+                <tr>
+                  <th>Teste</th><th>Hora</th><th>Oxigênio (%)</th><th>Inflamável (% LIE)</th><th>H₂S (ppm)</th><th>CO (ppm)</th><th>Obs.</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr data-gas-row="inicial">
+                  <td>1 — Teste inicial</td>
+                  <td><input type="time" name="gas_inicial_hora" required /></td>
+                  <td><input type="number" step="0.1" name="gas_inicial_o2" required /></td>
+                  <td><input type="number" step="0.1" name="gas_inicial_lie" required /></td>
+                  <td><input type="number" step="0.1" name="gas_inicial_h2s" required /></td>
+                  <td><input type="number" step="0.1" name="gas_inicial_co" required /></td>
+                  <td><input name="gas_inicial_obs" /></td>
+                </tr>
+                <tr data-gas-row="ventilacao">
+                  <td>2 — Após ventilação</td>
+                  <td><input type="time" name="gas_ventilacao_hora" /></td>
+                  <td><input type="number" step="0.1" name="gas_ventilacao_o2" /></td>
+                  <td><input type="number" step="0.1" name="gas_ventilacao_lie" /></td>
+                  <td><input type="number" step="0.1" name="gas_ventilacao_h2s" /></td>
+                  <td><input type="number" step="0.1" name="gas_ventilacao_co" /></td>
+                  <td><input name="gas_ventilacao_obs" /></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <label>Observações das medições
+            <textarea name="gasObservacoes" rows="2"></textarea>
+          </label>
+        </section>
+
+        <!-- Seção 4: lista dinâmica de profissionais, fotos e canvas de assinatura. -->
+        <section class="card">
+          <h2>4. Relação de profissionais e assinaturas</h2>
+          <p class="hint">Capture a foto do servidor e assine no campo correspondente. Foto, assinatura, data/hora, matrícula e demais dados entram no hash do registro.</p>
+          <div id="peopleList" class="people-list"></div>
+          <div class="actions no-print">
+            <button type="button" id="addEntrante" class="secondary">Adicionar entrante</button>
+            <button type="button" id="addVigia" class="secondary">Adicionar vigia</button>
+          </div>
+        </section>
+
+        <!-- Seção 5: ciência das orientações e observações gerais. -->
+        <section class="card">
+          <h2>5. Nota de orientação e ciência</h2>
+          <ol class="orientation">
+            <li>O acesso ao espaço confinado só deve ocorrer após a emissão e endosso da PET.</li>
+            <li>A PET deve ser encerrada ou cancelada quando o serviço terminar, ocorrer condição não prevista, houver interrupção ou troca de equipe.</li>
+            <li>A PET é válida somente para cada entrada e sua validade não deve exceder o limite regulamentar aplicável.</li>
+            <li>O vigia não pode realizar outras tarefas que comprometam o monitoramento dos trabalhadores autorizados.</li>
+            <li>Não é permitido trabalho em espaço confinado de forma individual ou isolada.</li>
+            <li>Compete ao supervisor emitir, encerrar ou cancelar a PET, realizar testes, conferir equipamentos e checar os procedimentos.</li>
+            <li>O trabalhador portador do monitor de gás deve ser o último a sair.</li>
+            <li>Em caso de alarme do monitor de gás, todos os trabalhadores devem abandonar o local imediatamente.</li>
+          </ol>
+          <label class="checkline"><input required type="checkbox" name="declaracaoCiencia" /> Declaro que as informações foram conferidas e que os envolvidos tiveram ciência das orientações da PET.</label>
+          <label>Observações gerais
+            <textarea name="observacoes" rows="4" placeholder="Observações, restrições, bloqueios, plano de resgate, intercorrências..."></textarea>
+          </label>
+        </section>
+
+        <!-- Seção 6: comandos de validação, finalização, impressão e exportação do JSON. -->
+        <section class="card status-card no-print">
+          <h2>6. Finalização e dossiê probatório</h2>
+          <div id="validationBox" class="validation-box">Preencha o formulário e clique em “Validar”.</div>
+          <div class="actions">
+            <button type="button" id="validateBtn" class="secondary">Validar</button>
+            <button type="button" id="finalizeBtn">Finalizar e assinar PET</button>
+            <button type="button" id="printBtn" class="secondary" disabled>Gerar PDF com prova</button>
+            <button type="button" id="exportBtn" class="secondary" disabled>Exportar dossiê JSON</button>
+          </div>
+          <div id="integrityPanel" class="integrity-panel hidden"></div>
+        </section>
+      </form>
+
+      <!-- Área de impressão: preenchida dinamicamente apenas após finalizar/gerar PDF. -->
+      <section id="printArea" class="print-area hidden"></section>
+    </section>
+
+    <!-- Aba Registros: lista PETs finalizadas e salvas no localStorage deste dispositivo. -->
+    <section id="recordsTab" class="tab">
+      <section class="card">
+        <h2>Registros salvos neste dispositivo</h2>
+        <p class="hint">Registros salvos apenas neste dispositivo. Para conferência futura, mantenha arquivados o PDF e o dossiê JSON exportado.</p>
+        <div class="actions no-print">
+          <button type="button" id="refreshRecords" class="secondary">Atualizar lista</button>
+        </div>
+        <div id="recordsList" class="records-list"></div>
+      </section>
+    </section>
+
+    <!-- Aba Validar: importa JSON e recalcula hash/assinaturas. -->
+    <section id="verifyTab" class="tab">
+      <section class="card">
+        <h2>Validar dossiê PET Digital</h2>
+        <p>Importe o dossiê JSON exportado pelo aplicativo. O validador recalcula os hashes, confere o padrão técnico declarado e verifica as assinaturas criptográficas registradas.</p>
+        <input type="file" id="verifyFile" accept="application/json,.json" />
+        <div id="verifyResult" class="validation-box"></div>
+      </section>
+    </section>
+
+    <!-- Aba Chave: gerenciamento da chave criptográfica local ECDSA P-256. -->
+    <section id="settingsTab" class="tab">
+      <section class="card">
+        <h2>Chave criptográfica local</h2>
+        <p>A chave ECDSA P‑256 local é usada para assinar o hash do registro e da prova de geração do PDF. A chave privada permanece neste dispositivo; a chave pública fica no dossiê para validação.</p>
+        <div id="keyStatus" class="key-status"></div>
+        <div class="actions no-print">
+          <button type="button" id="createKey" class="secondary">Gerar chave</button>
+          <button type="button" id="exportPublicKey" class="secondary">Exportar chave pública</button>
+          <button type="button" id="resetKey" class="danger ghost">Apagar chave local</button>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <footer class="footer no-print">
+    <span>PET Digital NR-33 — DMAE • Aplicação estática para Cloudflare Pages</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,171 @@
+/*
+ * Estilos do PET Digital NR-33.
+ *
+ * Organização:
+ * - Variáveis globais de cor e base visual.
+ * - Componentes da interface: cards, abas, tabelas, botões, validação, registros.
+ * - Componentes de autenticação: foto e assinatura.
+ * - Regras responsivas para celular/tablet.
+ * - Regras de impressão A4 paisagem para o PDF gerado pelo navegador.
+ */
+
+/* Paleta centralizada para facilitar alteração visual futura. */
+:root {
+  --bg: #eef3f8;
+  --card: #ffffff;
+  --text: #1a2433;
+  --muted: #5f6c7b;
+  --primary: #0b3a66;
+  --primary-2: #0e609c;
+  --danger: #b91c1c;
+  --warning: #a16207;
+  --ok: #166534;
+  --line: #d6dde6;
+  --soft: #f7fafc;
+}
+
+/* Reset básico e estilos comuns de formulário/botões. */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; font-family: Arial, Helvetica, sans-serif; color: var(--text); background: var(--bg); }
+button, input, textarea, select { font: inherit; }
+button { cursor: pointer; border: 0; border-radius: 10px; padding: 10px 14px; background: var(--primary); color: white; font-weight: 700; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button.secondary { background: var(--primary-2); }
+button.ghost { background: transparent; color: var(--primary); border: 1px solid var(--line); }
+button.danger { color: var(--danger); border-color: #f0bcbc; }
+button.small { padding: 6px 9px; font-size: 12px; border-radius: 8px; }
+
+/* Cabeçalho, navegação e layout principal das abas. */
+.topbar { position: sticky; top: 0; z-index: 10; display: flex; gap: 16px; align-items: center; justify-content: space-between; padding: 12px 18px; background: #ffffff; border-bottom: 1px solid var(--line); box-shadow: 0 1px 8px rgba(10, 30, 60, .08); }
+.topbar strong { display: block; color: var(--primary); font-size: 20px; }
+.topbar span { color: var(--muted); font-size: 12px; }
+.topbar nav { display: flex; gap: 8px; flex-wrap: wrap; }
+.update-banner { padding: 10px 18px; background: #fff7ed; border-bottom: 1px solid #fed7aa; color: #7c2d12; display: flex; align-items: center; justify-content: center; gap: 12px; }
+.hidden { display: none !important; }
+.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+.tab { display: none; }
+.tab.active { display: block; }
+/* Cartões e componentes de preenchimento do formulário. */
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px; margin-bottom: 18px; box-shadow: 0 8px 24px rgba(10, 30, 60, .05); }
+.hero { display: grid; grid-template-columns: 260px 1fr; align-items: center; gap: 18px; }
+.brand-box { border: 2px solid var(--primary); border-radius: 14px; padding: 16px; text-align: center; background: linear-gradient(180deg, #fff, #f2f7fb); }
+.brand-title { color: var(--primary); font-weight: 900; font-size: 42px; letter-spacing: 2px; }
+.brand-subtitle { color: var(--muted); font-size: 12px; }
+h1, h2, h3 { margin: 0 0 10px; }
+h1 { color: var(--primary); font-size: 28px; }
+h2 { color: var(--primary); font-size: 20px; }
+p { margin-top: 0; line-height: 1.45; }
+.hint { color: var(--muted); font-size: 14px; }
+.grid { display: grid; gap: 12px; margin-bottom: 12px; }
+.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+label { display: block; font-weight: 700; font-size: 13px; color: #29384a; }
+input, textarea, select { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 10px 11px; margin-top: 5px; background: #fff; color: var(--text); }
+textarea { resize: vertical; }
+input:invalid, textarea:invalid { border-color: #e0a2a2; }
+.inline-fieldset { border: 1px solid var(--line); border-radius: 12px; padding: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.inline-fieldset legend { font-weight: 700; color: #29384a; }
+.inline-fieldset label { display: inline-flex; align-items: center; gap: 5px; margin: 0; font-weight: 600; }
+.inline-fieldset input[type="radio"], .checkline input { width: auto; margin: 0; }
+.inline-fieldset input[name="telefoneSalvamento"] { max-width: 200px; }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+/* Tabelas do checklist e medições. */
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+table { border-collapse: collapse; width: 100%; background: #fff; }
+th, td { border: 1px solid var(--line); padding: 8px; vertical-align: top; }
+th { background: #dde5ef; color: #172033; text-align: center; }
+.checklist-table td:nth-child(1) { text-align: center; width: 48px; font-weight: 700; }
+.checklist-table td:nth-child(3), .checklist-table td:nth-child(4), .checklist-table td:nth-child(5) { text-align: center; width: 70px; }
+.checklist-table input[type="radio"] { width: 22px; height: 22px; margin: 0; }
+.gas-table input { min-width: 80px; }
+/* Cartões de profissionais e assinatura manuscrita. */
+.people-list { display: grid; gap: 12px; }
+.person-card { border: 1px solid var(--line); border-radius: 14px; padding: 12px; background: var(--soft); }
+.person-head { display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 8px; }
+.person-role { font-weight: 900; color: var(--primary); }
+.signature-pad { border: 1px dashed #7d8ea3; border-radius: 12px; background: #fff; width: 100%; height: 140px; touch-action: none; display: block; }
+.signature-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+.sig-status { color: var(--muted); font-size: 12px; }
+.orientation { margin: 0 0 14px; padding-left: 20px; line-height: 1.45; }
+.checkline { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+/* Caixas de validação e painel de integridade/hash. */
+.validation-box { background: #f8fafc; border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-top: 10px; white-space: pre-wrap; }
+.validation-box.ok { border-color: #86efac; background: #f0fdf4; color: var(--ok); }
+.validation-box.warn { border-color: #fcd34d; background: #fffbeb; color: var(--warning); }
+.validation-box.bad { border-color: #fca5a5; background: #fef2f2; color: var(--danger); }
+.integrity-panel { margin-top: 12px; padding: 12px; border-radius: 12px; background: #f6f9ff; border: 1px solid #c9d7ee; overflow-wrap: anywhere; }
+/* Aba de registros locais. */
+.records-list { display: grid; gap: 10px; margin-top: 12px; }
+.record-item { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: var(--soft); }
+.record-item strong { color: var(--primary); }
+.key-status pre, .integrity-panel pre { white-space: pre-wrap; word-break: break-all; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+.footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px; }
+
+.print-area { display: none; }
+
+/* Ajustes responsivos para telas menores. */
+@media (max-width: 860px) {
+  .topbar, .hero { display: block; }
+  .topbar nav { margin-top: 10px; }
+  .cols-2, .cols-3, .cols-4 { grid-template-columns: 1fr; }
+  .container { padding: 12px; }
+  .brand-box { margin-bottom: 12px; }
+  .record-item { grid-template-columns: 1fr; }
+}
+
+/* Modelo de impressão usado ao salvar/imprimir PDF pelo navegador. */
+@media print {
+  @page { size: A4 landscape; margin: 8mm; }
+  body { background: white; color: #000; }
+  .no-print, .topbar, .footer, .container > .tab:not(.active) { display: none !important; }
+  .container { max-width: none; margin: 0; padding: 0; }
+  #petForm { display: none !important; }
+  .print-area { display: block !important; }
+  .print-page { page-break-after: always; border: 2px solid #333; padding: 6px; min-height: 185mm; font-size: 10px; }
+  .print-page:last-child { page-break-after: auto; }
+  .print-header { display: grid; grid-template-columns: 260px 1fr 150px; border-bottom: 2px solid #333; align-items: stretch; }
+  .print-logo, .print-title, .print-rev { border-right: 1px solid #333; padding: 8px; text-align: center; }
+  .print-rev { border-right: 0; }
+  .print-title h1 { font-size: 18px; margin: 0; }
+  .print-logo strong { font-size: 30px; color: #000; }
+  .print-grid { display: grid; grid-template-columns: repeat(4, 1fr); }
+  .print-cell { min-height: 28px; border-right: 1px solid #333; border-bottom: 1px solid #333; padding: 4px; }
+  .print-cell.wide { grid-column: span 2; }
+  .print-cell.full { grid-column: span 4; }
+  .print-cell strong { display: block; font-size: 9px; }
+  .print-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+  .print-table th, .print-table td { border: 1px solid #333; padding: 3px; }
+  .print-table th { background: #ccc; color: #000; }
+  .print-table .center { text-align: center; }
+  .print-observacoes { border: 1px solid #333; min-height: 40px; padding: 4px; }
+  .print-section-title { background: #bbb; text-align: center; font-weight: 900; border: 1px solid #333; padding: 3px; font-size: 14px; }
+  .print-sig { max-height: 42px; max-width: 230px; display: block; }
+  .print-integrity { font-size: 8px; border: 1px solid #333; padding: 4px; margin-top: 4px; word-break: break-all; }
+}
+
+/* Área de autenticação de cada profissional: foto ao lado da assinatura. */
+.auth-grid { display: grid; grid-template-columns: 260px 1fr; gap: 12px; align-items: stretch; }
+.photo-box, .signature-box { border: 1px dashed #c6d1df; border-radius: 12px; padding: 10px; background: #fff; }
+.photo-preview { width: 100%; min-height: 170px; border: 1px solid var(--line); border-radius: 12px; display: flex; align-items: center; justify-content: center; overflow: hidden; background: #f8fafc; color: var(--muted); margin-top: 8px; }
+.photo-preview img { width: 100%; height: 170px; object-fit: cover; display: block; }
+.photo-input-label { display: block; margin-top: 8px; padding: 9px 11px; border-radius: 10px; background: var(--primary-2); color: #fff; text-align: center; cursor: pointer; }
+.photo-input-label input { display: none; }
+.photo-status { color: var(--muted); font-size: 12px; }
+
+@media (max-width: 860px) { .auth-grid { grid-template-columns: 1fr; } }
+
+@media print {
+  .print-photo { width: 72px; height: 72px; object-fit: cover; border: 1px solid #333; display: block; margin: 0 auto 2px; }
+  .print-sig { max-height: 48px; max-width: 190px; display: block; margin: 0 auto 2px; }
+  .print-table small { display: block; font-size: 7px; line-height: 1.2; }
+}
+
+/* Identidade visual DMAE. */
+.brand-logo-box { display: flex; align-items: center; justify-content: center; min-height: 110px; }
+.brand-logo { max-width: 100%; max-height: 105px; object-fit: contain; display: block; }
+
+@media print {
+  .print-dmae-logo { max-width: 230px; max-height: 70px; object-fit: contain; display: block; margin: 0 auto 3px; }
+  .print-logo small { display: block; font-size: 8px; line-height: 1.15; }
+}
