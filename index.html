@@ -114,7 +114,7 @@
         <section class="card">
           <h2>3. Medições de gases perigosos</h2>
           <p class="hint">Critérios de liberação adotados no modelo: O₂ entre 19,5% e 23%; inflamável &lt; 10% LIE; H₂S &lt; 5 ppm; CO &lt; 25 ppm.</p>
-          <div class="table-wrap">
+          <div class="table-wrap gas-wrap">
             <table id="gasTable" class="gas-table">
               <thead>
                 <tr>
@@ -186,7 +186,9 @@
             <button type="button" id="validateBtn" class="secondary">Validar</button>
             <button type="button" id="finalizeBtn">Finalizar e assinar PET</button>
             <button type="button" id="printBtn" class="secondary" disabled>Gerar PDF com prova</button>
+            <button type="button" id="sharePdfBtn" class="secondary" disabled>Compartilhar PDF</button>
             <button type="button" id="exportBtn" class="secondary" disabled>Exportar dossiê JSON</button>
+            <button type="button" id="shareJsonBtn" class="secondary" disabled>Compartilhar JSON</button>
           </div>
           <div id="integrityPanel" class="integrity-panel hidden"></div>
         </section>
@@ -234,7 +236,7 @@
   </main>
 
   <footer class="footer no-print">
-    <span>PET Digital NR-33 — DMAE • Aplicação estática para Cloudflare Pages</span>
+    <span>PET Digital NR-33 — DMAE • Permissão de Entrada e Trabalho para Espaço Confinado</span>
   </footer>
 
   <script src="app.js"></script>

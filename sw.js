@@ -9,7 +9,7 @@
  */
 
 // Nome do cache. Cache versionado para controlar atualização entre versões publicadas.
-const CACHE_NAME = 'pet-digital-cache-v1.0.3';
+const CACHE_NAME = 'pet-digital-cache-v1.0.4';
 
 // Arquivos essenciais para abrir o aplicativo mesmo sem internet.
 const APP_SHELL = [

@@ -2,7 +2,7 @@
   'use strict';
 
   /**
-   * PET Digital NR-33 v1.0.3.
+   * PET Digital NR-33 v1.0.4.
    *
    * Visão geral do arquivo:
    * - Este app é um PWA estático: não depende de servidor próprio para preencher, assinar,
@@ -19,16 +19,24 @@
    */
 
   // Versão funcional gravada no dossiê e exibida nos elementos de prova.
-  const APP_VERSION = '1.0.3';
+  const APP_VERSION = '1.0.4';
 
   // Perfil técnico aceito pelo próprio validador. Esses valores padronizam como o hash
   // é calculado, qual algoritmo assina o registro e como outro validador deve conferir.
   const VALIDATION_PROFILE = 'PET-DIGITAL-NR33-PROOF/v1';
-  const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.0.3';
+  const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.0.4';
   const RECORD_TYPE = 'PET-DIGITAL-DOSSIE/v1';
   const HASH_ALGORITHM = 'SHA-256';
   const SIGNATURE_ALGORITHM = 'ECDSA-P256-SHA256';
   const CANONICALIZATION_ALGORITHM = 'JSON_CANONICAL_STABLE_STRINGIFY_V1';
+
+  // Bibliotecas usadas apenas quando o usuário pede compartilhamento direto do PDF.
+  // O aplicativo continua funcionando sem elas: se o carregamento externo falhar,
+  // o sistema mantém o fluxo tradicional de impressão/salvar PDF pelo navegador.
+  const PDF_LIBRARIES = {
+    html2canvas: 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js',
+    jsPdf: 'https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js'
+  };
 
   // Chaves usadas no localStorage para separar rascunhos, registros finalizados e chave criptográfica.
   const STORAGE_DRAFT = 'petDigitalDraftV4';
@@ -763,7 +771,9 @@
       $('#validationBox').textContent = 'Preencha o formulário e clique em “Validar”.';
       $('#integrityPanel').classList.add('hidden');
       $('#printBtn').disabled = true;
+      $('#sharePdfBtn').disabled = true;
       $('#exportBtn').disabled = true;
+      $('#shareJsonBtn').disabled = true;
     });
 
     $('#validateBtn').addEventListener('click', () => {
@@ -772,11 +782,13 @@
     });
 
     $('#finalizeBtn').addEventListener('click', finalizeRecord);
-    $('#printBtn').addEventListener('click', () => printRecordWithProof(finalizedRecord));
+    $('#printBtn').addEventListener('click', event => printRecordWithProof(finalizedRecord, event.currentTarget));
+    $('#sharePdfBtn').addEventListener('click', event => sharePdfRecord(finalizedRecord, event.currentTarget));
     $('#exportBtn').addEventListener('click', () => {
       if (!finalizedRecord) return;
-      downloadJson(finalizedRecord, safeFilename(`PET_${finalizedRecord.payload?.fields?.petNumero || finalizedRecord.recordId}.json`));
+      downloadJson(finalizedRecord, jsonFilename(finalizedRecord));
     });
+    $('#shareJsonBtn').addEventListener('click', event => shareJsonRecord(finalizedRecord, event.currentTarget));
 
     // Eventos das abas auxiliares: histórico local, validador de JSON e gerenciamento da chave.
     $('#refreshRecords').addEventListener('click', renderRecords);
@@ -1078,40 +1090,185 @@
     renderIntegrity(finalizedRecord);
     renderPrintArea(finalizedRecord);
     $('#printBtn').disabled = false;
+    $('#sharePdfBtn').disabled = false;
     $('#exportBtn').disabled = false;
+    $('#shareJsonBtn').disabled = false;
     localStorage.removeItem(STORAGE_DRAFT);
     alert('PET finalizada, assinada e salva neste dispositivo. Exporte o JSON e salve o PDF para arquivamento.');
   }
 
   /**
+   * Anexa uma nova prova de geração de PDF ao registro.
+   * Ativação: impressão, compartilhamento de PDF e compartilhamento de pacote com PDF.
+   * O que faz: coleta IP/GPS/data/hora, assina a prova, atualiza o registro local e redesenha
+   * a área de impressão com os dados probatórios mais recentes.
+   */
+  async function appendPdfProofAndRender(record) {
+    const proof = await buildPdfGenerationProof(record);
+    record.integrity.pdfGenerationProofs = record.integrity.pdfGenerationProofs || [];
+    record.integrity.pdfGenerationProofs.push(proof);
+    record.integrity.latestPdfProofHashSha256 = proof.pdfProofHashSha256;
+    finalizedRecord = record;
+    updateStoredRecord(record);
+    renderIntegrity(record);
+    renderPrintArea(record);
+    return proof;
+  }
+
+  /**
    * Gera a prova de PDF e chama a impressão do navegador.
    * Ativação: botão 'Gerar PDF com prova' ou botão PDF em registros salvos.
-   * O que faz: coleta IP/GPS/data/hora, assina a prova, atualiza o registro local, redesenha
-   * a área de impressão e executa `window.print()` para salvar/imprimir o PDF.
+   * O que faz: coleta IP/GPS/data/hora, assina a prova, atualiza o registro local, prepara
+   * um nome de arquivo mais específico no título do documento e executa `window.print()`.
    */
-  async function printRecordWithProof(record) {
+  async function printRecordWithProof(record, triggerButton, options = {}) {
     if (!record) return;
-    const button = $('#printBtn');
+    const button = triggerButton || $('#printBtn');
     const originalText = button ? button.textContent : '';
+    const originalTitle = document.title;
     try {
       if (button) {
         button.disabled = true;
-        button.textContent = 'Coletando prova do PDF...';
+        button.textContent = options.skipProof ? 'Preparando PDF...' : 'Coletando prova do PDF...';
       }
-      const proof = await buildPdfGenerationProof(record);
-      record.integrity.pdfGenerationProofs = record.integrity.pdfGenerationProofs || [];
-      record.integrity.pdfGenerationProofs.push(proof);
-      record.integrity.latestPdfProofHashSha256 = proof.pdfProofHashSha256;
-      finalizedRecord = record;
-      updateStoredRecord(record);
-      renderIntegrity(record);
-      renderPrintArea(record);
+      if (!options.skipProof) await appendPdfProofAndRender(record);
+      else renderPrintArea(record);
+
+      // Muitos navegadores usam document.title como sugestão de nome ao salvar como PDF.
+      document.title = pdfFilename(record).replace(/\.pdf$/i, '');
+      const restoreTitle = () => { document.title = originalTitle; };
+      window.addEventListener('afterprint', restoreTitle, { once: true });
       window.print();
+      setTimeout(restoreTitle, 1500);
     } finally {
       if (button) {
         button.disabled = false;
         button.textContent = originalText || 'Gerar PDF com prova';
       }
+    }
+  }
+
+  /**
+   * Compartilha o dossiê JSON pela folha nativa de compartilhamento do celular/navegador.
+   * Ativação: botão 'Compartilhar JSON' da PET finalizada ou da aba Registros.
+   * O que faz: cria um arquivo JSON em memória e usa a Web Share API; se o navegador não
+   * suportar compartilhamento de arquivos, faz o download como fallback.
+   */
+  async function shareJsonRecord(record, triggerButton) {
+    if (!record) return;
+    const button = triggerButton || $('#shareJsonBtn');
+    const originalText = button ? button.textContent : '';
+    try {
+      if (button) { button.disabled = true; button.textContent = 'Compartilhando JSON...'; }
+      const file = createJsonFile(record);
+      await shareFilesOrDownload([file], 'Dossiê PET Digital NR-33', `Dossiê JSON da ${record.payload?.fields?.petNumero || record.recordId}.`);
+    } catch (err) {
+      if (err.name !== 'AbortError') alert('Não foi possível compartilhar o JSON: ' + err.message);
+    } finally {
+      if (button) { button.disabled = false; button.textContent = originalText || 'Compartilhar JSON'; }
+    }
+  }
+
+  /**
+   * Compartilha o PDF pela folha nativa de compartilhamento do celular/navegador.
+   * Ativação: botão 'Compartilhar PDF' da PET finalizada ou da aba Registros.
+   * O que faz: adiciona uma prova de geração do PDF, tenta gerar um PDF real no navegador
+   * usando bibliotecas carregadas sob demanda e compartilha o arquivo. Se não for possível,
+   * mantém o fallback seguro de impressão/salvar PDF pelo navegador.
+   */
+  async function sharePdfRecord(record, triggerButton) {
+    if (!record) return;
+    const button = triggerButton || $('#sharePdfBtn');
+    const originalText = button ? button.textContent : '';
+    try {
+      if (button) { button.disabled = true; button.textContent = 'Gerando PDF...'; }
+      await appendPdfProofAndRender(record);
+      const pdfFile = await createPdfFile(record);
+      if (button) button.textContent = 'Abrindo compartilhamento...';
+      await shareFilesOrDownload([pdfFile], 'PET Digital NR-33 — PDF', `PDF da ${record.payload?.fields?.petNumero || record.recordId}.`);
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      alert('Não foi possível gerar o PDF para compartilhamento direto. O aplicativo abrirá a tela de impressão/salvar PDF do navegador. Motivo: ' + err.message);
+      await printRecordWithProof(record, button, { skipProof: true });
+    } finally {
+      if (button) { button.disabled = false; button.textContent = originalText || 'Compartilhar PDF'; }
+    }
+  }
+
+  /**
+   * Carrega uma biblioteca JavaScript externa apenas quando necessária.
+   * Ativação: geração de PDF compartilhável, dentro de `ensurePdfLibraries`.
+   * O que faz: injeta uma tag script e resolve quando o navegador conclui o carregamento.
+   */
+  function loadScriptOnce(src) {
+    return new Promise((resolve, reject) => {
+      const existing = document.querySelector(`script[src="${src}"]`);
+      if (existing) {
+        existing.addEventListener('load', resolve, { once: true });
+        existing.addEventListener('error', () => reject(new Error('Falha ao carregar biblioteca.')), { once: true });
+        if (existing.dataset.loaded === 'true') resolve();
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = src;
+      script.async = true;
+      script.onload = () => { script.dataset.loaded = 'true'; resolve(); };
+      script.onerror = () => reject(new Error('Falha ao carregar biblioteca externa para PDF.'));
+      document.head.appendChild(script);
+    });
+  }
+
+  /**
+   * Garante que html2canvas e jsPDF estejam disponíveis.
+   * Ativação: antes de criar o PDF compartilhável.
+   * O que faz: usa bibliotecas já carregadas, quando existirem, ou tenta carregá-las por CDN.
+   */
+  async function ensurePdfLibraries() {
+    if (!window.html2canvas) await loadScriptOnce(PDF_LIBRARIES.html2canvas);
+    if (!window.jspdf?.jsPDF) await loadScriptOnce(PDF_LIBRARIES.jsPdf);
+    if (!window.html2canvas || !window.jspdf?.jsPDF) throw new Error('Bibliotecas de geração de PDF não disponíveis.');
+  }
+
+  /**
+   * Aguarda as imagens da área de impressão carregarem antes de transformar em PDF.
+   * Ativação: criação de PDF compartilhável.
+   * O que faz: evita PDF sem logo, foto ou assinatura quando a renderização começa cedo demais.
+   */
+  function waitForImages(root) {
+    const images = $$('img', root);
+    return Promise.all(images.map(img => img.complete ? Promise.resolve() : new Promise(resolve => {
+      img.onload = resolve;
+      img.onerror = resolve;
+    })));
+  }
+
+  /**
+   * Cria um arquivo PDF real a partir da área de impressão.
+   * Ativação: botão 'Compartilhar PDF'.
+   * O que faz: renderiza cada página da PET como imagem de alta resolução e insere as páginas
+   * em um PDF A4 paisagem, retornando um File pronto para Web Share API ou download.
+   */
+  async function createPdfFile(record) {
+    renderPrintArea(record);
+    await ensurePdfLibraries();
+    const area = $('#printArea');
+    area.classList.add('pdf-render-mode');
+    try {
+      await waitForImages(area);
+      const { jsPDF } = window.jspdf;
+      const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4', compress: true });
+      const pages = $$('.print-page', area);
+      if (!pages.length) throw new Error('Área de impressão não encontrada.');
+      for (let i = 0; i < pages.length; i++) {
+        const canvas = await window.html2canvas(pages[i], { scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false });
+        const imgData = canvas.toDataURL('image/jpeg', 0.92);
+        if (i > 0) pdf.addPage('a4', 'landscape');
+        pdf.addImage(imgData, 'JPEG', 0, 0, 297, 210, undefined, 'FAST');
+      }
+      const blob = pdf.output('blob');
+      return new File([blob], pdfFilename(record), { type: 'application/pdf' });
+    } finally {
+      area.classList.remove('pdf-render-mode');
     }
   }
 
@@ -1360,10 +1517,12 @@
     box.innerHTML = records.map((r, idx) => `<div class="record-item">
       <div><strong>${escapeHtml(r.payload?.fields?.petNumero || r.recordId)}</strong><br>
       Local: ${escapeHtml(r.payload?.fields?.local || '')}<br>
-      Finalizado: ${formatDateTime(r.integrity?.finalizedAt)}<br><small>Hash: ${escapeHtml(r.integrity?.payloadHashSha256 || '')}</small></div>
+      Finalizado: ${formatDateTime(r.integrity?.finalizedAt)}<br><small class="record-hash">Hash: ${escapeHtml(r.integrity?.payloadHashSha256 || '')}</small></div>
       <div class="actions">
         <button type="button" class="small secondary" data-record-action="print" data-index="${idx}">PDF</button>
+        <button type="button" class="small secondary" data-record-action="sharePdf" data-index="${idx}">Compartilhar PDF</button>
         <button type="button" class="small secondary" data-record-action="export" data-index="${idx}">JSON</button>
+        <button type="button" class="small secondary" data-record-action="shareJson" data-index="${idx}">Compartilhar JSON</button>
         <button type="button" class="small danger ghost" data-record-action="delete" data-index="${idx}">Excluir local</button>
       </div>
     </div>`).join('');
@@ -1375,9 +1534,14 @@
       if (btn.dataset.recordAction === 'print') {
         finalizedRecord = rec;
         showTab('formTab');
-        await printRecordWithProof(rec);
+        await printRecordWithProof(rec, btn);
       }
-      if (btn.dataset.recordAction === 'export') downloadJson(rec, safeFilename(`PET_${rec.payload?.fields?.petNumero || rec.recordId}.json`));
+      if (btn.dataset.recordAction === 'sharePdf') {
+        finalizedRecord = rec;
+        await sharePdfRecord(rec, btn);
+      }
+      if (btn.dataset.recordAction === 'export') downloadJson(rec, jsonFilename(rec));
+      if (btn.dataset.recordAction === 'shareJson') await shareJsonRecord(rec, btn);
       if (btn.dataset.recordAction === 'delete') {
         if (!confirm('Excluir este registro apenas deste dispositivo?')) return;
         const updated = getRecords();
@@ -1479,7 +1643,32 @@
       return;
     }
     const key = JSON.parse(raw);
-    box.innerHTML = `<p><strong>Chave ativa:</strong> ${escapeHtml(key.algorithm)}<br><strong>Criada em:</strong> ${formatDateTime(key.createdAt)}<br><strong>Hash da chave pública:</strong> ${escapeHtml(key.publicKeyHash)}</p><pre>${escapeHtml(JSON.stringify({ publicKeyHash: key.publicKeyHash, publicKey: key.publicKey }, null, 2))}</pre>`;
+    box.innerHTML = `<p><strong>Chave ativa:</strong> ${escapeHtml(key.algorithm)}<br><strong>Criada em:</strong> ${formatDateTime(key.createdAt)}<br><strong>Hash da chave pública:</strong> <span class="hash-text">${escapeHtml(key.publicKeyHash)}</span></p><pre>${escapeHtml(JSON.stringify({ publicKeyHash: key.publicKeyHash, publicKey: key.publicKey }, null, 2))}</pre>`;
+  }
+
+  /**
+   * Cria uma base padronizada e legível para nomes de arquivo.
+   * Ativação: exportação, compartilhamento e sugestão de nome do PDF.
+   * O que faz: combina número da PET, data, local resumido e registro em um nome seguro.
+   */
+  function recordFileStem(record) {
+    const fields = record?.payload?.fields || {};
+    const pet = fields.petNumero || record?.recordId || 'PET';
+    const date = (fields.data || '').replace(/-/g, '') || new Date(record?.integrity?.finalizedAt || Date.now()).toISOString().slice(0, 10).replace(/-/g, '');
+    const local = normalizeText(fields.local || 'local').slice(0, 50);
+    const stem = `PET_NR33_DMAE_${pet}_${date}_${local}_${record?.recordId || ''}`;
+    return safeFilename(stem).replace(/^_+|_+$/g, '').slice(0, 150);
+  }
+
+  /** Retorna o nome sugerido para o PDF da PET. */
+  function pdfFilename(record) { return `${recordFileStem(record)}.pdf`; }
+
+  /** Retorna o nome sugerido para o dossiê JSON da PET. */
+  function jsonFilename(record) { return `${recordFileStem(record)}_dossie.json`; }
+
+  /** Cria um File JSON em memória para compartilhamento nativo. */
+  function createJsonFile(record) {
+    return new File([JSON.stringify(record, null, 2)], jsonFilename(record), { type: 'application/json' });
   }
 
   /**
@@ -1489,6 +1678,11 @@
    */
   function downloadJson(data, filename) {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    downloadBlob(blob, filename);
+  }
+
+  /** Baixa um Blob/File usando link temporário. */
+  function downloadBlob(blob, filename) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1497,6 +1691,21 @@
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+  }
+
+  /**
+   * Compartilha arquivos pela Web Share API ou baixa como fallback.
+   * Ativação: botões de compartilhamento de PDF/JSON.
+   * O que faz: tenta abrir a folha nativa de compartilhamento do celular; quando o navegador
+   * não suporta arquivos, salva os arquivos localmente para o usuário encaminhar manualmente.
+   */
+  async function shareFilesOrDownload(files, title, text) {
+    if (navigator.share && navigator.canShare && navigator.canShare({ files })) {
+      await navigator.share({ files, title, text });
+      return;
+    }
+    files.forEach(file => downloadBlob(file, file.name));
+    alert('Este navegador não permite compartilhar arquivos diretamente. O arquivo foi baixado para envio manual.');
   }
 
   /**

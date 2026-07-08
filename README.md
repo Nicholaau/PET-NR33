@@ -1,8 +1,22 @@
 # PET Digital — NR-33 — DMAE
 
-Versão: 1.0.3
+Versão: 1.0.4
 
 Aplicação PWA estática para preenchimento de Permissão de Entrada e Trabalho (PET) em espaços confinados, com foto dos participantes, assinatura manuscrita em tela, hash SHA-256, assinatura criptográfica local ECDSA P-256, prova de geração do PDF e validação por dossiê JSON.
+
+
+## Alterações da versão 1.0.4
+
+- Incluídos botões de **Compartilhar PDF** e **Compartilhar JSON** usando a Web Share API quando suportada pelo navegador.
+- O compartilhamento do JSON cria um arquivo `.json` em memória e abre a folha nativa de compartilhamento do celular.
+- O compartilhamento do PDF tenta gerar um arquivo PDF real no navegador com `html2canvas`/`jsPDF`; se o navegador/rede não permitir, mantém o fallback de impressão/salvar PDF.
+- O nome sugerido para o PDF foi customizado com número da PET, data, local e identificador do registro.
+- O nome do JSON também foi padronizado para acompanhar o PDF.
+- Ajustado o layout da aba **Chave** para quebrar hashes longos sem sair da tela.
+- Ajustado o layout da aba **Registros** para quebrar hashes longos nos cartões.
+- Ajustada a seção **Medições de gases perigosos** em celular: a tabela vira cartões verticais, eliminando rolagem lateral.
+- Rodapé/interface com linguagem mais operacional, sem referência visual a ambiente de desenvolvimento.
+- Cache do Service Worker atualizado para `v1.0.4`.
 
 ## Alterações da versão 1.0.3
 

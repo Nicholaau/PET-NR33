@@ -79,6 +79,7 @@ th { background: #dde5ef; color: #172033; text-align: center; }
 .checklist-table td:nth-child(3), .checklist-table td:nth-child(4), .checklist-table td:nth-child(5) { text-align: center; width: 70px; }
 .checklist-table input[type="radio"] { width: 22px; height: 22px; margin: 0; }
 .gas-table input { min-width: 80px; }
+.gas-wrap { overflow-x: auto; }
 /* Cartões de profissionais e assinatura manuscrita. */
 .people-list { display: grid; gap: 12px; }
 .person-card { border: 1px solid var(--line); border-radius: 14px; padding: 12px; background: var(--soft); }
@@ -97,9 +98,11 @@ th { background: #dde5ef; color: #172033; text-align: center; }
 .integrity-panel { margin-top: 12px; padding: 12px; border-radius: 12px; background: #f6f9ff; border: 1px solid #c9d7ee; overflow-wrap: anywhere; }
 /* Aba de registros locais. */
 .records-list { display: grid; gap: 10px; margin-top: 12px; }
-.record-item { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: var(--soft); }
+.record-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: var(--soft); }
+.record-item > div { min-width: 0; }
 .record-item strong { color: var(--primary); }
-.key-status pre, .integrity-panel pre { white-space: pre-wrap; word-break: break-all; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+.record-hash, .hash-text, .key-status { overflow-wrap: anywhere; word-break: break-word; }
+.key-status pre, .integrity-panel pre { white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; max-width: 100%; overflow-x: auto; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
 .footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px; }
 
 .print-area { display: none; }
@@ -143,6 +146,52 @@ th { background: #dde5ef; color: #172033; text-align: center; }
   .print-sig { max-height: 42px; max-width: 230px; display: block; }
   .print-integrity { font-size: 8px; border: 1px solid #333; padding: 4px; margin-top: 4px; word-break: break-all; }
 }
+
+
+
+/* Em telas estreitas, a tabela de gases vira cartões verticais para eliminar rolagem lateral. */
+@media (max-width: 700px) {
+  .gas-wrap { overflow-x: visible; border: 0; }
+  .gas-table, .gas-table tbody, .gas-table tr, .gas-table td { display: block; width: 100%; }
+  .gas-table thead { display: none; }
+  .gas-table tr { border: 1px solid var(--line); border-radius: 12px; margin-bottom: 12px; overflow: hidden; background: #fff; }
+  .gas-table td { border: 0; border-bottom: 1px solid var(--line); padding: 10px; }
+  .gas-table td:last-child { border-bottom: 0; }
+  .gas-table td::before { display: block; margin-bottom: 4px; color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
+  .gas-table td:nth-child(1)::before { content: "Teste"; }
+  .gas-table td:nth-child(2)::before { content: "Hora"; }
+  .gas-table td:nth-child(3)::before { content: "Oxigênio (%)"; }
+  .gas-table td:nth-child(4)::before { content: "Inflamável (% LIE)"; }
+  .gas-table td:nth-child(5)::before { content: "H₂S (ppm)"; }
+  .gas-table td:nth-child(6)::before { content: "CO (ppm)"; }
+  .gas-table td:nth-child(7)::before { content: "Observações"; }
+  .gas-table input { min-width: 0; width: 100%; }
+}
+
+/* Modo temporário usado pelo compartilhamento direto de PDF com html2canvas/jsPDF. */
+.print-area.pdf-render-mode { display: block !important; position: fixed; left: -10000px; top: 0; width: 297mm; background: #fff; z-index: -1; }
+.pdf-render-mode .print-page { width: 297mm; min-height: 210mm; border: 2px solid #333; padding: 6px; font-size: 10px; background: #fff; color: #000; page-break-after: always; }
+.pdf-render-mode .print-header { display: grid; grid-template-columns: 260px 1fr 150px; border-bottom: 2px solid #333; align-items: stretch; }
+.pdf-render-mode .print-logo, .pdf-render-mode .print-title, .pdf-render-mode .print-rev { border-right: 1px solid #333; padding: 8px; text-align: center; }
+.pdf-render-mode .print-rev { border-right: 0; }
+.pdf-render-mode .print-title h1 { font-size: 18px; margin: 0; color: #000; }
+.pdf-render-mode .print-grid { display: grid; grid-template-columns: repeat(4, 1fr); }
+.pdf-render-mode .print-cell { min-height: 28px; border-right: 1px solid #333; border-bottom: 1px solid #333; padding: 4px; }
+.pdf-render-mode .print-cell.wide { grid-column: span 2; }
+.pdf-render-mode .print-cell.full { grid-column: span 4; }
+.pdf-render-mode .print-cell strong { display: block; font-size: 9px; }
+.pdf-render-mode .print-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+.pdf-render-mode .print-table th, .pdf-render-mode .print-table td { border: 1px solid #333; padding: 3px; }
+.pdf-render-mode .print-table th { background: #ccc; color: #000; }
+.pdf-render-mode .print-table .center { text-align: center; }
+.pdf-render-mode .print-observacoes { border: 1px solid #333; min-height: 40px; padding: 4px; }
+.pdf-render-mode .print-section-title { background: #bbb; text-align: center; font-weight: 900; border: 1px solid #333; padding: 3px; font-size: 14px; }
+.pdf-render-mode .print-integrity { font-size: 8px; border: 1px solid #333; padding: 4px; margin-top: 4px; word-break: break-all; }
+.pdf-render-mode .print-photo { width: 72px; height: 72px; object-fit: cover; border: 1px solid #333; display: block; margin: 0 auto 2px; }
+.pdf-render-mode .print-sig { max-height: 48px; max-width: 190px; display: block; margin: 0 auto 2px; }
+.pdf-render-mode .print-table small { display: block; font-size: 7px; line-height: 1.2; }
+.pdf-render-mode .print-dmae-logo { max-width: 230px; max-height: 70px; object-fit: contain; display: block; margin: 0 auto 3px; }
+.pdf-render-mode .print-logo small { display: block; font-size: 8px; line-height: 1.15; }
 
 /* Área de autenticação de cada profissional: foto ao lado da assinatura. */
 .auth-grid { display: grid; grid-template-columns: 260px 1fr; gap: 12px; align-items: stretch; }
