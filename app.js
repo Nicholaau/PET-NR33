@@ -2,7 +2,7 @@
   'use strict';
 
   /**
-   * PET Digital NR-33 v1.0.4.
+   * PET Digital NR-33 v1.0.5.
    *
    * Visão geral do arquivo:
    * - Este app é um PWA estático: não depende de servidor próprio para preencher, assinar,
@@ -19,16 +19,21 @@
    */
 
   // Versão funcional gravada no dossiê e exibida nos elementos de prova.
-  const APP_VERSION = '1.0.4';
+  const APP_VERSION = '1.0.5';
 
   // Perfil técnico aceito pelo próprio validador. Esses valores padronizam como o hash
   // é calculado, qual algoritmo assina o registro e como outro validador deve conferir.
   const VALIDATION_PROFILE = 'PET-DIGITAL-NR33-PROOF/v1';
-  const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.0.4';
+  const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.0.5';
   const RECORD_TYPE = 'PET-DIGITAL-DOSSIE/v1';
   const HASH_ALGORITHM = 'SHA-256';
   const SIGNATURE_ALGORITHM = 'ECDSA-P256-SHA256';
   const CANONICALIZATION_ALGORITHM = 'JSON_CANONICAL_STABLE_STRINGIFY_V1';
+
+  // Limiares mínimos para aceitar uma assinatura desenhada no canvas.
+  // Evita salvar canvas vazio ou marcas acidentais muito pequenas como assinatura válida.
+  const SIGNATURE_MIN_INK_PIXELS = 35;
+  const SIGNATURE_MIN_BOUNDS = 8;
 
   // Bibliotecas usadas apenas quando o usuário pede compartilhamento direto do PDF.
   // O aplicativo continua funcionando sem elas: se o carregamento externo falhar,
@@ -39,7 +44,7 @@
   };
 
   // Chaves usadas no localStorage para separar rascunhos, registros finalizados e chave criptográfica.
-  const STORAGE_DRAFT = 'petDigitalDraftV4';
+  const STORAGE_DRAFT = 'petDigitalDraftV5';
   const STORAGE_RECORDS = 'petDigitalRecordsV1';
   const STORAGE_KEYPAIR = 'petDigitalKeyPairV1';
 
@@ -296,6 +301,67 @@
   }
 
   /**
+   * Mede se o canvas de assinatura possui tinta suficiente para ser considerado assinado.
+   * Ativação: botão 'Registrar assinatura'.
+   * O que faz: percorre os pixels do canvas, conta pixels não transparentes/escuros e calcula
+   * a área ocupada. Isso impede que um canvas vazio seja salvo como assinatura válida.
+   */
+  function getSignatureCanvasMetrics(canvas) {
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const { width, height } = canvas;
+    const data = ctx.getImageData(0, 0, width, height).data;
+    let inkPixels = 0;
+    let minX = width;
+    let minY = height;
+    let maxX = -1;
+    let maxY = -1;
+
+    for (let i = 0; i < data.length; i += 4) {
+      const alpha = data[i + 3];
+      if (alpha <= 16) continue;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      if (r > 245 && g > 245 && b > 245) continue;
+      const pixel = i / 4;
+      const x = pixel % width;
+      const y = Math.floor(pixel / width);
+      inkPixels++;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+
+    const boundsWidth = maxX >= minX ? maxX - minX + 1 : 0;
+    const boundsHeight = maxY >= minY ? maxY - minY + 1 : 0;
+    const isSigned = inkPixels >= SIGNATURE_MIN_INK_PIXELS && (boundsWidth >= SIGNATURE_MIN_BOUNDS || boundsHeight >= SIGNATURE_MIN_BOUNDS);
+    return { isSigned, inkPixels, boundsWidth, boundsHeight };
+  }
+
+  /**
+   * Limpa os dados de assinatura de um profissional e atualiza a interface do cartão.
+   * Ativação: assinatura vazia, botão 'Limpar assinatura' e correção de assinaturas inválidas.
+   * O que faz: remove imagem, hash, data/hora e métricas da assinatura para impedir que
+   * assinatura vazia ou incompleta avance para o dossiê.
+   */
+  function clearPersonSignature(person, card) {
+    Object.assign(person, {
+      signatureDataUrl: '',
+      signedAt: '',
+      signatureHash: '',
+      signatureMetrics: null,
+      _dirtySignature: false
+    });
+    if (card) {
+      const canvas = $('.signature-pad', card);
+      if (canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+      const status = $('.sig-status', card);
+      if (status) status.textContent = 'Pendente de assinatura';
+    }
+  }
+
+  /**
    * Obtém o IP público no momento da geração do PDF.
    * Ativação: botão 'Gerar PDF com prova', dentro de `buildPdfGenerationProof`.
    * O que faz: tenta primeiro o endpoint Cloudflare `/cdn-cgi/trace`; se falhar, tenta
@@ -502,6 +568,7 @@
       signatureDataUrl: '',
       signedAt: '',
       signatureHash: '',
+      signatureMetrics: null,
       photoDataUrl: '',
       photoCapturedAt: '',
       photoHash: ''
@@ -552,6 +619,7 @@
     }
     reindexPeople();
     renderPeople();
+    markFinalizedRecordStale();
     autoSaveDraft();
   }
 
@@ -570,15 +638,15 @@
       div.dataset.personId = person.id;
       div.innerHTML = `
         <div class="person-head">
-          <span class="person-role">${escapeHtml(person.role)} ${person.required ? '<span title="Obrigatório">*</span>' : ''}</span>
+          <span class="person-role">${escapeHtml(person.role)} <span title="Obrigatório">*</span></span>
           ${!person.required && ['entrante', 'vigia'].includes(person.type) ? '<button type="button" class="small danger ghost remove-person">Remover</button>' : ''}
         </div>
         <div class="grid cols-2">
           <label>Nome completo
-            <input data-field="nome" ${person.required ? 'required' : ''} value="${escapeAttr(person.nome)}" />
+            <input data-field="nome" required value="${escapeAttr(person.nome)}" />
           </label>
           <label>Matrícula
-            <input data-field="matricula" ${person.required ? 'required' : ''} value="${escapeAttr(person.matricula)}" />
+            <input data-field="matricula" required value="${escapeAttr(person.matricula)}" />
           </label>
         </div>
         <div class="auth-grid">
@@ -676,6 +744,33 @@
   }
 
   /**
+   * Invalida a PET finalizada quando o formulário é alterado depois da assinatura.
+   * Ativação: edição de campos, foto, assinatura ou inclusão/remoção de profissionais.
+   * O que faz: desabilita PDF/JSON da finalização anterior para evitar que o usuário
+   * compartilhe um dossiê antigo após ter modificado dados na tela.
+   */
+  function markFinalizedRecordStale() {
+    if (!finalizedRecord) return;
+    finalizedRecord = null;
+    ['#printBtn', '#sharePdfBtn', '#exportBtn', '#shareJsonBtn'].forEach(selector => {
+      const btn = $(selector);
+      if (btn) btn.disabled = true;
+    });
+    const panel = $('#integrityPanel');
+    if (panel) panel.classList.add('hidden');
+    const area = $('#printArea');
+    if (area) {
+      area.classList.add('hidden');
+      area.innerHTML = '';
+    }
+    const box = $('#validationBox');
+    if (box) {
+      box.className = 'validation-box warn';
+      box.textContent = 'O formulário foi alterado após a última finalização. Valide e finalize novamente para gerar PDF/JSON atualizados.';
+    }
+  }
+
+  /**
    * Centraliza a amarração de todos os eventos da interface.
    * Ativação: uma vez durante `init()`, depois que o DOM e os componentes dinâmicos existem.
    * O que faz: liga botões, abas, uploads de foto, assinatura, validação, finalização,
@@ -693,6 +788,7 @@
       if (!card || !event.target.dataset.field) return;
       const person = people.find(p => p.id === card.dataset.personId);
       if (person) person[event.target.dataset.field] = event.target.value;
+      markFinalizedRecordStale();
       autoSaveDraft();
     });
 
@@ -711,6 +807,7 @@
         const preview = $('.photo-preview', card);
         preview.innerHTML = `<img src="${dataUrl}" alt="Foto de ${escapeAttr(person.nome || person.role)}" />`;
         $('.photo-status', card).textContent = `Capturada em ${formatDateTime(person.photoCapturedAt)}`;
+        markFinalizedRecordStale();
         autoSaveDraft();
       } catch (err) {
         alert('Não foi possível registrar a foto: ' + err.message);
@@ -727,30 +824,40 @@
       if (!person) return;
       if (event.target.classList.contains('save-signature')) {
         const canvas = $('.signature-pad', card);
+        const metrics = getSignatureCanvasMetrics(canvas);
+        if (!metrics.isSigned) {
+          clearPersonSignature(person, card);
+          markFinalizedRecordStale();
+          autoSaveDraft();
+          alert(`${person.role}: desenhe a assinatura antes de registrar. O canvas vazio não será aceito.`);
+          return;
+        }
         person.signatureDataUrl = canvas.toDataURL('image/png');
         person.signedAt = new Date().toISOString();
         person.signatureHash = await sha256Hex(person.signatureDataUrl);
+        person.signatureMetrics = metrics;
         person._dirtySignature = false;
         $('.sig-status', card).textContent = `Assinada em ${formatDateTime(person.signedAt)}`;
+        markFinalizedRecordStale();
         autoSaveDraft();
       }
       if (event.target.classList.contains('clear-signature')) {
-        const canvas = $('.signature-pad', card);
-        canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
-        Object.assign(person, { signatureDataUrl: '', signedAt: '', signatureHash: '', _dirtySignature: false });
-        $('.sig-status', card).textContent = 'Pendente de assinatura';
+        clearPersonSignature(person, card);
+        markFinalizedRecordStale();
         autoSaveDraft();
       }
       if (event.target.classList.contains('clear-photo')) {
         Object.assign(person, { photoDataUrl: '', photoCapturedAt: '', photoHash: '' });
         $('.photo-preview', card).innerHTML = '<span>Sem foto</span>';
         $('.photo-status', card).textContent = 'Pendente de foto';
+        markFinalizedRecordStale();
         autoSaveDraft();
       }
       if (event.target.classList.contains('remove-person')) {
         people = people.filter(p => p.id !== person.id);
         reindexPeople();
         renderPeople();
+        markFinalizedRecordStale();
         autoSaveDraft();
       }
     });
@@ -802,8 +909,13 @@
     });
 
     // Autosave com debounce para evitar perda de preenchimento durante o uso em campo.
-    $('#petForm').addEventListener('input', debounce(autoSaveDraft, 400));
-    $('#petForm').addEventListener('change', debounce(autoSaveDraft, 400));
+    // Qualquer alteração após finalizar invalida os botões PDF/JSON até nova finalização.
+    const handleFormEdited = debounce(() => {
+      markFinalizedRecordStale();
+      autoSaveDraft();
+    }, 400);
+    $('#petForm').addEventListener('input', handleFormEdited);
+    $('#petForm').addEventListener('change', handleFormEdited);
   }
 
   /**
@@ -880,6 +992,7 @@
       signatureDataUrl: p.signatureDataUrl || '',
       signedAt: p.signedAt || '',
       signatureHash: p.signatureHash || '',
+      signatureMetrics: p.signatureMetrics || null,
       photoDataUrl: p.photoDataUrl || '',
       photoCapturedAt: p.photoCapturedAt || '',
       photoHash: p.photoHash || ''
@@ -951,7 +1064,7 @@
     if (!form.checkValidity()) {
       errors.push('Há campos obrigatórios não preenchidos.');
       const first = form.querySelector(':invalid');
-      if (first?.name) errors.push(`Verifique o campo: ${first.name}.`);
+      if (first) errors.push(`Verifique o campo: ${first.name || first.dataset?.field || first.getAttribute('aria-label') || first.type}.`);
     }
 
     const checklist = collectChecklist();
@@ -974,23 +1087,51 @@
     if (arMandado === 'S' && linhaAr !== 'S') errors.push('Item 15 indica necessidade de ar mandado, mas o item 19 não confirma linha de ar instalada e operando.');
     if (checklist.find(c => c.number === '20')?.answer === 'S') warnings.push('Item 20: há necessidade de ferramentas elétricas intrinsecamente seguras. Confira especificação e liberação antes da entrada.');
 
+    const detectorOk = checklist.find(c => c.number === '10')?.answer;
+    if (detectorOk === 'S' && !form.elements.detectorCalibracao.value) warnings.push('Item 10 marcado como SIM, mas a data de validade/calibração do detector não foi informada.');
+    if (detectorOk === 'S' && !normalizeText(form.elements.detectorId.value)) warnings.push('Item 10 marcado como SIM, mas o identificador do detector não foi informado.');
+
     const gasChecks = checkGasMeasurements();
     errors.push(...gasChecks.errors);
     warnings.push(...gasChecks.warnings);
 
-    const filledPeople = people.filter(p => normalizeText(p.nome) || normalizeText(p.matricula) || p.photoDataUrl || p.signatureDataUrl);
-    const requiredPeople = people.filter(p => p.required);
-    requiredPeople.forEach(p => {
+    const typeCounts = people.reduce((acc, p) => {
+      acc[p.type] = (acc[p.type] || 0) + 1;
+      return acc;
+    }, {});
+    if (!typeCounts.entrante) errors.push('Inclua pelo menos um entrante.');
+    if (!typeCounts.vigia) errors.push('Inclua pelo menos um vigia.');
+    if (!typeCounts.supervisor) errors.push('Inclua o supervisor de entrada.');
+
+    // Todos os cartões exibidos são tratados como participantes efetivos da PET.
+    // Se um entrante/vigia adicional foi incluído por engano, ele deve ser removido antes de finalizar.
+    people.forEach(p => {
       if (!normalizeText(p.nome)) errors.push(`${p.role}: nome obrigatório.`);
       if (!normalizeText(p.matricula)) errors.push(`${p.role}: matrícula obrigatória.`);
       if (!p.photoDataUrl) errors.push(`${p.role}: foto obrigatória para vincular a assinatura ao participante.`);
       if (!p.signatureDataUrl) errors.push(`${p.role}: assinatura obrigatória.`);
+      if (p._dirtySignature) errors.push(`${p.role}: assinatura foi alterada no canvas, mas ainda não foi registrada. Clique em “Registrar assinatura”.`);
+      if (p.signatureDataUrl && p.signatureMetrics && !p.signatureMetrics.isSigned) errors.push(`${p.role}: assinatura inválida ou vazia. Limpe e assine novamente.`);
     });
-    filledPeople.forEach(p => {
-      if (!normalizeText(p.nome) || !normalizeText(p.matricula) || !p.photoDataUrl || !p.signatureDataUrl) {
-        warnings.push(`${p.role}: se o profissional participar, preencha nome, matrícula, foto e assinatura.`);
-      }
+
+    const matriculas = new Map();
+    people.forEach(p => {
+      const mat = normalizeText(p.matricula).toLowerCase();
+      if (!mat) return;
+      const list = matriculas.get(mat) || [];
+      list.push(p.role);
+      matriculas.set(mat, list);
     });
+    matriculas.forEach((roles, mat) => {
+      if (roles.length > 1) warnings.push(`Matrícula repetida (${mat}) em: ${roles.join(', ')}. Confira se não houve duplicidade de cadastro.`);
+    });
+
+    const supervisorCard = people.find(p => p.type === 'supervisor');
+    const supervisorField = normalizeText(form.elements.supervisorEntrada.value).toLowerCase();
+    const supervisorName = normalizeText(supervisorCard?.nome).toLowerCase();
+    if (supervisorField && supervisorName && supervisorField !== supervisorName) {
+      warnings.push('O nome do “Supervisor de entrada” na identificação está diferente do nome informado no cartão de assinatura do supervisor.');
+    }
 
     const emission = form.elements.horaEmissao.value;
     const termino = form.elements.horaTermino.value;

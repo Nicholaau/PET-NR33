@@ -1,9 +1,18 @@
 # PET Digital — NR-33 — DMAE
 
-Versão: 1.0.4
+Versão: 1.0.5
 
 Aplicação PWA estática para preenchimento de Permissão de Entrada e Trabalho (PET) em espaços confinados, com foto dos participantes, assinatura manuscrita em tela, hash SHA-256, assinatura criptográfica local ECDSA P-256, prova de geração do PDF e validação por dossiê JSON.
 
+
+## Alterações da versão 1.0.5
+
+- Adicionada verificação real do canvas antes de registrar assinatura: canvas vazio ou com marca acidental muito pequena não é aceito.
+- Assinaturas agora salvam métricas mínimas de validação do traço, além do hash da imagem.
+- Todos os entrantes/vigias adicionados passam a ser tratados como participantes obrigatórios da PET: nome, matrícula, foto e assinatura são exigidos para cada cartão exibido.
+- Se o usuário alterar o formulário após finalizar a PET, os botões de PDF/JSON são desabilitados até nova validação/finalização, evitando compartilhar dossiê antigo.
+- Incluídos avisos contra uso não intencional: matrícula repetida, divergência entre nome do supervisor no cabeçalho e no cartão de assinatura, detector sem identificação/calibração informada, e assinatura alterada no canvas sem novo registro.
+- Cache do Service Worker atualizado para `v1.0.5`.
 
 ## Alterações da versão 1.0.4
 
