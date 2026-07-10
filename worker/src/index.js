@@ -1,5 +1,5 @@
 /**
- * PET-Digital NR-33 v1.1.0 — Worker/API Cloudflare comentado.
+ * PET-Digital NR-33 v1.1.1 — Worker/API Cloudflare comentado.
  *
  * O que é este arquivo?
  * - É a API backend do PET-Digital. Ele roda no Cloudflare Worker.
@@ -231,7 +231,7 @@ async function createUser(request, env) {
       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, 1, ?)`)
       .bind(id, clean(body.name), clean(body.matricula), clean(body.email || null), role, clean(body.unit || null), password.hash, password.salt, password.alg, nowIso()).run();
   } catch (e) {
-    throw httpError(409, 'Não foi possível cadastrar usuário. Verifique se a matrícula/e-mail já existem e se o schema do D1 aceita os perfis v1.1.0.');
+    throw httpError(409, 'Não foi possível cadastrar usuário. Verifique se a matrícula/e-mail já existem e se o schema do D1 aceita os perfis v1.1.1.');
   }
   await audit(env, auth.user.id, 'user_create', 'app_users', id, 'success', request, { role, matricula: clean(body.matricula) });
   return json({ ok: true, user: publicUser({ id, name: clean(body.name), matricula: clean(body.matricula), email: clean(body.email || null), role, unit: clean(body.unit || null), status: 'active' }) }, 201);
@@ -504,7 +504,7 @@ async function pbkdf2(password, saltHex, pepper, iterations) {
 
 /**
  * O quê: extrai a quantidade de iterações gravada no campo `password_alg`.
- * Como: lê o número depois de dois-pontos em strings como PBKDF2-SHA256:120000.
+ * Como: lê o número depois de dois-pontos em strings como PBKDF2-SHA256:100000.
  * Quando: validação de senha, permitindo migrar iterações no futuro.
  */
 function parseIterations(alg) {

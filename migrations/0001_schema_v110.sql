@@ -1,4 +1,4 @@
--- PET-Digital NR-33 v1.1.0
+-- PET-Digital NR-33 v1.1.1
 -- Schema completo para Cloudflare D1.
 -- Não armazena PDF, JSON, fotos ou assinaturas desenhadas.
 

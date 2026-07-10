@@ -2,7 +2,7 @@
   'use strict';
 
   /**
-   * PET Digital NR-33 v1.1.0 — frontend comentado.
+   * PET Digital NR-33 v1.1.1 — frontend comentado.
    *
    * Visão geral do arquivo:
    * - Este app é um PWA estático: não depende de servidor próprio para preencher, assinar,
@@ -10,7 +10,7 @@
    * - O estado temporário fica em memória (`people` e `finalizedRecord`) e o rascunho/
    *   registros finalizados são persistidos no `localStorage` do dispositivo.
    * - O fluxo principal é: preencher formulário -> validar -> finalizar/assinar hash ->
-   *   gerar prova de PDF -> imprimir/salvar PDF -> exportar JSON probatório.
+   *   gerar prova de PDF -> imprimir/salvar PDF -> exportar comprovante técnico.
    * - Foto, assinatura desenhada, dados do formulário e prova de geração do PDF entram
    *   no material que é hasheado e assinado criptograficamente.
    *
@@ -19,12 +19,12 @@
    */
 
   // Versão funcional gravada no dossiê e exibida nos elementos de prova.
-  const APP_VERSION = '1.1.0';
+  const APP_VERSION = '1.1.1';
 
   // Perfil técnico aceito pelo próprio validador. Esses valores padronizam como o hash
   // é calculado, qual algoritmo assina o registro e como outro validador deve conferir.
   const VALIDATION_PROFILE = 'PET-DIGITAL-NR33-PROOF/v1';
-  const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.1.0';
+  const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.1.1';
   const RECORD_TYPE = 'PET-DIGITAL-DOSSIE/v1';
   const HASH_ALGORITHM = 'SHA-256';
   const SIGNATURE_ALGORITHM = 'ECDSA-P256-SHA256';
@@ -315,7 +315,7 @@
 
   /**
    * Verifica se uma assinatura criptográfica corresponde a um hash.
-   * Ativação: tela 'Validar' ao importar um dossiê JSON.
+   * Ativação: tela 'Validar' ao importar um comprovante técnico.
    * O que faz: importa a chave pública do dossiê e usa WebCrypto para confirmar se a
    * assinatura realmente foi feita sobre aquele hash.
    */
@@ -369,23 +369,126 @@
     return data;
   }
 
-  /** Atualiza a interface de login e menus administrativos. */
+  /** Atualiza a interface de login e o aviso da tela principal. */
   function renderAuthState() {
     const status = $('#authStatus');
     const apiLabel = $('#apiBaseLabel');
     if (apiLabel) apiLabel.textContent = API_BASE_URL;
-    if (!status) return;
     const state = authState || loadAuthState();
-    if (!state?.user) {
-      status.className = 'validation-box warn';
-      status.textContent = 'Não autenticado. A PET pode ser gerada localmente, mas o hash não será registrado no D1 até fazer login e registrar/aprovar a chave do dispositivo.';
-      return;
+
+    if (status) {
+      if (!state?.user) {
+        status.className = 'validation-box warn';
+        status.textContent = 'Você ainda não está conectado. Faça login para finalizar a PET oficial, registrar a emissão no sistema e gerar PDF/comprovante técnico.';
+      } else {
+        status.className = 'validation-box ok';
+        status.textContent = `Conectado como ${state.user.name} (${state.user.matricula}) — perfil: ${state.user.role}.`;
+      }
     }
-    status.className = 'validation-box ok';
-    status.textContent = `Autenticado como ${state.user.name} (${state.user.matricula}) — perfil: ${state.user.role}.`;
+    updateFormAccessStatus();
   }
 
-  /** Cria o primeiro admin usando o BOOTSTRAP_ADMIN_TOKEN configurado no Worker. */
+  /**
+   * Atualiza o aviso de acesso na tela de preenchimento.
+   * O quê: orienta o usuário sobre o próximo passo antes de emitir a PET oficial.
+   * Como: confere se há sessão local e mostra um texto simples, sem expor termos técnicos.
+   * Quando: ao abrir o app, fazer login, sair, registrar dispositivo ou trocar de aba.
+   */
+  function updateFormAccessStatus(message, type = 'warn') {
+    const box = $('#formAuthGate');
+    if (!box) return;
+    const state = authState || loadAuthState();
+    if (message) {
+      box.className = `validation-box ${type}`;
+      box.textContent = message;
+      return;
+    }
+    if (!state?.user) {
+      box.className = 'validation-box warn';
+      box.textContent = 'Para emitir a PET oficial e gerar PDF/comprovante técnico, faça login. Sem login, use esta tela apenas como rascunho.';
+      return;
+    }
+    box.className = 'validation-box ok';
+    box.textContent = `Usuário conectado: ${state.user.name}. Antes da emissão oficial, confirme se este dispositivo está autorizado na aba Acesso.`;
+  }
+
+  /**
+   * Confere se a conta e o dispositivo podem emitir documento oficial.
+   * O quê: bloqueia finalização/PDF/comprovante sem login e sem dispositivo autorizado.
+   * Como: gera ou lê a proteção local do dispositivo, consulta a API e verifica se o status está ativo.
+   * Quando: antes de finalizar a PET, gerar PDF, compartilhar PDF ou salvar/compartilhar comprovante técnico.
+   */
+  async function ensureOfficialAccessOrGuide(actionLabel = 'continuar') {
+    const state = authState || loadAuthState();
+    if (!state?.user || !authToken()) {
+      updateFormAccessStatus(`Faça login para ${actionLabel}.`, 'warn');
+      alert(`Faça login para ${actionLabel}.`);
+      showTab('systemTab');
+      setTimeout(() => $('#loginMatricula')?.focus(), 100);
+      return false;
+    }
+
+    let key;
+    try {
+      key = await ensureKeyPair();
+      await updateKeyStatus();
+    } catch (err) {
+      updateFormAccessStatus('Não foi possível preparar este dispositivo para emissão oficial.', 'bad');
+      alert('Não foi possível preparar este dispositivo: ' + err.message);
+      showTab('settingsTab');
+      return false;
+    }
+
+    let devices = [];
+    try {
+      const data = await apiFetch('/devices');
+      devices = data.devices || [];
+      renderDevicesList(devices);
+    } catch (err) {
+      updateFormAccessStatus('Não foi possível consultar a autorização deste dispositivo.', 'bad');
+      alert('Não foi possível consultar a autorização deste dispositivo: ' + err.message);
+      showTab('systemTab');
+      return false;
+    }
+
+    const ownMatches = devices.filter(d => d.public_key_hash === key.publicKeyHash && (!d.user_id || d.user_id === state.user.id));
+    const active = ownMatches.find(d => d.status === 'active');
+    if (active) {
+      updateFormAccessStatus('Acesso confirmado. Você pode finalizar a PET oficial e gerar os documentos.', 'ok');
+      return true;
+    }
+    const pending = ownMatches.find(d => d.status === 'pending');
+    if (pending) {
+      updateFormAccessStatus('Este dispositivo já foi enviado para autorização, mas ainda está pendente de aprovação.', 'warn');
+      alert('Este dispositivo ainda está aguardando aprovação. Solicite aprovação a um gestor/admin antes de gerar documento oficial.');
+      showTab('systemTab');
+      return false;
+    }
+
+    updateFormAccessStatus('Este dispositivo ainda não foi autorizado para emissão oficial.', 'warn');
+    alert('Antes de gerar documento oficial, autorize este dispositivo na aba Acesso.');
+    showTab('systemTab');
+    setTimeout(() => $('#registerDeviceBtn')?.focus(), 100);
+    return false;
+  }
+
+  /**
+   * Garante que o registro pode sair do dispositivo como documento oficial.
+   * O quê: impede PDF/comprovante de PET não registrada no sistema.
+   * Como: confere acesso oficial e, se necessário, registra automaticamente a PET na API.
+   * Quando: antes de imprimir, compartilhar, baixar ou exportar documentos definitivos.
+   */
+  async function ensureRecordReadyForOutput(record, actionLabel = 'gerar documento') {
+    if (!record) return false;
+    const accessOk = await ensureOfficialAccessOrGuide(actionLabel);
+    if (!accessOk) return false;
+    if (!record.serverRegistration) {
+      await registerRecordOnServer(record, { silent: true });
+    }
+    return !!record.serverRegistration;
+  }
+
+  /** Cria o primeiro admin usando o token de instalação configurado no Worker. */
   async function setupFirstAdmin() {
     const body = {
       token: normalizeText($('#setupToken').value),
@@ -396,7 +499,7 @@
     };
     if (!body.token || !body.name || !body.matricula || !body.password) return alert('Informe token, nome, matrícula e senha inicial.');
     const data = await apiFetch('/setup/admin', { method: 'POST', body });
-    alert('Primeiro admin criado. Agora faça login com a matrícula e senha cadastradas.');
+    alert('Primeiro administrador criado. Agora faça login com a matrícula e senha cadastradas.');
     $('#loginMatricula').value = body.matricula;
     $('#setupToken').value = $('#setupPassword').value = '';
     renderAuthState();
@@ -412,7 +515,8 @@
     saveAuthState({ token: data.token, user: data.user, loggedAt: new Date().toISOString() });
     $('#loginPassword').value = '';
     await refreshDevices(true);
-    alert('Login realizado.');
+    updateFormAccessStatus('Login realizado. Agora confira se este dispositivo está autorizado.', 'ok');
+    alert('Login realizado. Confira a autorização deste dispositivo antes de finalizar PET oficial.');
   }
 
   /** Encerra a sessão local e tenta revogar no Worker. */
@@ -421,6 +525,11 @@
     saveAuthState(null);
     $('#devicesList').innerHTML = '';
     $('#usersList').innerHTML = '';
+    const box = $('#deviceRegistrationStatus');
+    if (box) {
+      box.className = 'validation-box warn';
+      box.textContent = 'Entre no sistema para autorizar ou consultar este dispositivo.';
+    }
   }
 
   /** Consulta o usuário atual no Worker para confirmar se o token ainda vale. */
@@ -429,12 +538,13 @@
     try {
       const data = await apiFetch('/auth/me');
       saveAuthState({ ...authState, user: data.user });
+      await refreshDevices(true);
     } catch {
       saveAuthState(null);
     }
   }
 
-  /** Cadastra usuário no D1. Disponível para admin/gestor. */
+  /** Cadastra usuário no sistema. Disponível para admin/gestor. */
   async function createUser() {
     const body = {
       name: normalizeText($('#newUserName').value),
@@ -463,9 +573,9 @@
     }
   }
 
-  /** Registra a chave pública do dispositivo no Worker/D1. */
+  /** Autoriza este dispositivo no sistema. */
   async function registerDevice() {
-    if (!authToken()) return alert('Faça login antes de registrar a chave do dispositivo.');
+    if (!authToken()) return alert('Faça login antes de autorizar este dispositivo.');
     const key = await ensureKeyPair();
     const body = {
       deviceLabel: normalizeText($('#deviceLabel').value) || `Dispositivo ${new Date().toLocaleDateString('pt-BR')}`,
@@ -476,19 +586,48 @@
     const data = await apiFetch('/devices/register', { method: 'POST', body });
     const box = $('#deviceRegistrationStatus');
     if (box) {
-      box.className = 'validation-box ' + (data.device.status === 'active' ? 'ok' : 'warn');
-      box.textContent = `Chave registrada com status: ${data.device.status}. Hash: ${data.device.public_key_hash || body.publicKeyHash}`;
+      const active = data.device.status === 'active';
+      box.className = 'validation-box ' + (active ? 'ok' : 'warn');
+      box.textContent = active ? 'Dispositivo autorizado para emissão oficial.' : 'Dispositivo enviado para aprovação. Aguarde um gestor/admin autorizar.';
     }
     await refreshDevices(true);
+    await updateKeyStatus();
   }
 
-  /** Lista dispositivos/chaves. Operacional vê as próprias chaves; gestores veem todas. */
+  /** Renderiza a lista de dispositivos de forma amigável. */
+  function renderDevicesList(devices) {
+    const box = $('#devicesList');
+    if (!box) return;
+    box.innerHTML = (devices || []).map(d => `<div class="record-item"><div><strong>${escapeHtml(d.device_label)}</strong><br>Usuário: ${escapeHtml(d.user_name || d.user_id || '')} • Situação: ${escapeHtml(d.status)}<details class="advanced-details"><summary>Detalhes técnicos</summary><small class="hash-text">Código do dispositivo: ${escapeHtml(d.public_key_hash)}</small></details></div><div class="actions no-print">${['admin','gestor'].includes(authState?.user?.role) && d.status === 'pending' ? `<button type="button" class="small secondary" data-device-approve="${escapeAttr(d.id)}">Aprovar</button>` : ''}${['admin','gestor'].includes(authState?.user?.role) && d.status !== 'revoked' ? `<button type="button" class="small danger ghost" data-device-revoke="${escapeAttr(d.id)}">Revogar</button>` : ''}</div></div>`).join('') || '<p class="hint">Nenhum dispositivo encontrado.</p>';
+  }
+
+  /** Lista dispositivos autorizados. Operacional vê os próprios; gestores veem todos. */
   async function refreshDevices(silent = false) {
     const box = $('#devicesList');
     if (!box) return;
     try {
       const data = await apiFetch('/devices');
-      box.innerHTML = data.devices.map(d => `<div class="record-item"><div><strong>${escapeHtml(d.device_label)}</strong><br>Usuário: ${escapeHtml(d.user_name || d.user_id || '')} • Status: ${escapeHtml(d.status)}<br><small class="hash-text">${escapeHtml(d.public_key_hash)}</small></div><div class="actions no-print">${['admin','gestor'].includes(authState?.user?.role) && d.status === 'pending' ? `<button type="button" class="small secondary" data-device-approve="${escapeAttr(d.id)}">Aprovar</button>` : ''}${['admin','gestor'].includes(authState?.user?.role) && d.status !== 'revoked' ? `<button type="button" class="small danger ghost" data-device-revoke="${escapeAttr(d.id)}">Revogar</button>` : ''}</div></div>`).join('') || '<p class="hint">Nenhuma chave registrada.</p>';
+      renderDevicesList(data.devices || []);
+      const key = await readLocalKeyPair();
+      const state = authState || loadAuthState();
+      const mine = key ? (data.devices || []).filter(d => d.public_key_hash === key.publicKeyHash && (!d.user_id || d.user_id === state?.user?.id)) : [];
+      const active = mine.find(d => d.status === 'active');
+      const pending = mine.find(d => d.status === 'pending');
+      const deviceBox = $('#deviceRegistrationStatus');
+      if (deviceBox && state?.user) {
+        if (active) {
+          deviceBox.className = 'validation-box ok';
+          deviceBox.textContent = 'Este dispositivo está autorizado para emissão oficial.';
+          updateFormAccessStatus('Acesso confirmado. Você pode finalizar a PET oficial e gerar os documentos.', 'ok');
+        } else if (pending) {
+          deviceBox.className = 'validation-box warn';
+          deviceBox.textContent = 'Este dispositivo está cadastrado, mas ainda aguarda aprovação.';
+          updateFormAccessStatus('Este dispositivo ainda aguarda aprovação para emissão oficial.', 'warn');
+        } else if (key) {
+          deviceBox.className = 'validation-box warn';
+          deviceBox.textContent = 'Este dispositivo ainda não foi autorizado. Clique em “Autorizar este dispositivo”.';
+        }
+      }
     } catch (err) {
       if (!silent) box.innerHTML = `<div class="validation-box bad">${escapeHtml(err.message)}</div>`;
     }
@@ -512,11 +651,11 @@
     }));
   }
 
-  /** Registra hashes da PET no Worker/D1, sem enviar PDF/JSON/fotos para armazenamento. */
+  /** Registra no sistema o comprovante técnico da PET, sem enviar PDF/fotos/assinaturas. */
   async function registerRecordOnServer(record, options = {}) {
     if (!record) return;
     if (!authToken()) {
-      if (!options.silent) alert('Faça login para registrar o hash no D1.');
+      if (!options.silent) alert('Faça login para registrar a PET no sistema.');
       return;
     }
     const sig = record.integrity?.supervisorCryptographicSignature || {};
@@ -540,8 +679,8 @@
     record.serverRegistration = data.petRecord;
     updateStoredRecord(record);
     renderIntegrity(record);
-    renderServerPanel(`Hash registrado no D1. Nº PET: ${data.petRecord.numero_pet}. Status: ${data.petRecord.status}.`, 'ok');
-    if (!options.silent) alert('Hash da PET registrado no D1.');
+    renderServerPanel(`PET registrada no sistema. Nº PET: ${data.petRecord.numero_pet}. Status: ${data.petRecord.status}.`, 'ok');
+    if (!options.silent) alert('PET registrada no sistema.');
   }
 
   /** Mostra status de sincronização/registro no servidor. */
@@ -553,15 +692,15 @@
     panel.textContent = message;
   }
 
-  /** Consulta hash no Worker/D1. */
+  /** Consulta um código técnico já registrado no sistema. */
   async function validateHashOnServer(hash) {
     const payloadHash = normalizeText(hash || $('#serverHashInput').value).toLowerCase();
-    if (!/^[a-f0-9]{64}$/.test(payloadHash)) return alert('Informe um hash SHA-256 válido com 64 caracteres hexadecimais.');
+    if (!/^[a-f0-9]{64}$/.test(payloadHash)) return alert('Informe um código técnico válido com 64 caracteres.');
     const result = $('#serverValidateResult');
     try {
       const data = await apiFetch('/validate', { method: 'POST', body: { payloadHash } });
       result.className = 'validation-box ' + (data.found ? 'ok' : 'warn');
-      result.textContent = data.found ? `Hash encontrado no D1. Nº PET: ${data.record.numero_pet}. Recebido no servidor: ${formatDateTime(data.record.server_received_at)}. Status: ${data.record.status}.` : 'Hash não encontrado no D1.';
+      result.textContent = data.found ? `Comprovante encontrado no sistema. Nº PET: ${data.record.numero_pet}. Recebido em: ${formatDateTime(data.record.server_received_at)}. Status: ${data.record.status}.` : 'Comprovante não encontrado no sistema.';
     } catch (err) {
       result.className = 'validation-box bad';
       result.textContent = err.message;
@@ -662,7 +801,7 @@
 
   /**
    * Obtém o IP público no momento da geração do PDF.
-   * Ativação: botão 'Gerar PDF com prova', dentro de `buildPdfGenerationProof`.
+   * Ativação: botão 'Gerar PDF oficial', dentro de `buildPdfGenerationProof`.
    * O que faz: tenta primeiro o endpoint Cloudflare `/cdn-cgi/trace`; se falhar, tenta
    * `api.ipify.org`; se ambos falharem, registra o erro no dossiê sem travar a impressão.
    */
@@ -694,7 +833,7 @@
 
   /**
    * Solicita a geolocalização do navegador/dispositivo.
-   * Ativação: botão 'Gerar PDF com prova', dentro de `buildPdfGenerationProof`.
+   * Ativação: botão 'Gerar PDF oficial', dentro de `buildPdfGenerationProof`.
    * O que faz: usa `navigator.geolocation.getCurrentPosition` com alta precisão, registra
    * latitude, longitude, acurácia e timestamp, ou salva o motivo da indisponibilidade.
    */
@@ -786,7 +925,7 @@
 
   /**
    * Monta a prova de geração do PDF.
-   * Ativação: clique no botão 'Gerar PDF com prova'.
+   * Ativação: clique no botão 'Gerar PDF oficial'.
    * O que faz: coleta data/hora local e ISO, fuso, IP, geolocalização e userAgent; calcula
    * hash próprio da prova e assina esse hash com a chave criptográfica local.
    */
@@ -1045,7 +1184,7 @@
   /**
    * Invalida a PET finalizada quando o formulário é alterado depois da assinatura.
    * Ativação: edição de campos, foto, assinatura ou inclusão/remoção de profissionais.
-   * O que faz: desabilita PDF/JSON da finalização anterior para evitar que o usuário
+   * O que faz: desabilita PDF/comprovante técnico da finalização anterior para evitar que o usuário
    * compartilhe um dossiê antigo após ter modificado dados na tela.
    */
   function markFinalizedRecordStale() {
@@ -1067,7 +1206,7 @@
     const box = $('#validationBox');
     if (box) {
       box.className = 'validation-box warn';
-      box.textContent = 'O formulário foi alterado após a última finalização. Valide e finalize novamente para gerar PDF/JSON atualizados.';
+      box.textContent = 'O formulário foi alterado após a última finalização. Valide e finalize novamente para gerar PDF/comprovante técnico atualizados.';
     }
   }
 
@@ -1176,7 +1315,7 @@
       resetPeople();
       renderPeople();
       $('#validationBox').className = 'validation-box';
-      $('#validationBox').textContent = 'Preencha o formulário e clique em “Validar”.';
+      $('#validationBox').textContent = 'Preencha o formulário e clique em “Validar”. Para finalizar e gerar os documentos oficiais, é necessário estar logado e com o dispositivo autorizado.';
       $('#integrityPanel').classList.add('hidden');
       $('#registerServerBtn').disabled = true;
       $('#printBtn').disabled = true;
@@ -1194,8 +1333,10 @@
     $('#registerServerBtn').addEventListener('click', () => registerRecordOnServer(finalizedRecord));
     $('#printBtn').addEventListener('click', event => printRecordWithProof(finalizedRecord, event.currentTarget));
     $('#sharePdfBtn').addEventListener('click', event => sharePdfRecord(finalizedRecord, event.currentTarget));
-    $('#exportBtn').addEventListener('click', () => {
+    $('#exportBtn').addEventListener('click', async () => {
       if (!finalizedRecord) return;
+      const ready = await ensureRecordReadyForOutput(finalizedRecord, 'salvar o comprovante técnico');
+      if (!ready) return;
       downloadJson(finalizedRecord, jsonFilename(finalizedRecord));
     });
     $('#shareJsonBtn').addEventListener('click', event => shareJsonRecord(finalizedRecord, event.currentTarget));
@@ -1203,10 +1344,10 @@
     // Eventos das abas auxiliares: histórico local, validador de JSON e gerenciamento da chave.
     $('#refreshRecords').addEventListener('click', renderRecords);
     $('#verifyFile').addEventListener('change', verifyFile);
-    $('#createKey').addEventListener('click', async () => { await createKeyPair(); alert('Chave local gerada.'); });
+    $('#createKey').addEventListener('click', async () => { await createKeyPair(); await updateKeyStatus(); alert('Dispositivo preparado. Agora faça a autorização na aba Acesso, se ainda não tiver feito.'); });
     $('#exportPublicKey').addEventListener('click', exportPublicKey);
     $('#resetKey').addEventListener('click', () => {
-      if (!confirm('Apagar a chave local? Registros já assinados continuarão verificáveis pelo JSON exportado, mas esta instalação não poderá assinar com a chave antiga.')) return;
+      if (!confirm('Apagar a autorização local deste dispositivo? Registros já emitidos continuarão verificáveis pelo comprovante técnico, mas este aparelho precisará ser preparado e autorizado novamente.')) return;
       deleteLocalKeyPair().then(updateKeyStatus);
     });
 
@@ -1223,11 +1364,11 @@
       const approveId = event.target.dataset.deviceApprove;
       const revokeId = event.target.dataset.deviceRevoke;
       if (approveId) changeDeviceStatus(approveId, 'approve').catch(err => alert(err.message));
-      if (revokeId && confirm('Revogar esta chave?')) changeDeviceStatus(revokeId, 'revoke').catch(err => alert(err.message));
+      if (revokeId && confirm('Revogar este dispositivo?')) changeDeviceStatus(revokeId, 'revoke').catch(err => alert(err.message));
     });
 
     // Autosave com debounce para evitar perda de preenchimento durante o uso em campo.
-    // Qualquer alteração após finalizar invalida os botões PDF/JSON até nova finalização.
+    // Qualquer alteração após finalizar invalida os botões PDF/comprovante técnico até nova finalização.
     const handleFormEdited = debounce(() => {
       markFinalizedRecordStale();
       autoSaveDraft();
@@ -1519,12 +1660,15 @@
   }
 
   /**
-   * Finaliza a PET e cria o dossiê probatório.
-   * Ativação: clique no botão 'Finalizar e assinar PET'.
-   * O que faz: valida, monta payload, calcula hash SHA-256, assina o hash, gera recordId,
-   * salva localmente, renderiza painel/área de impressão e libera PDF/JSON.
+   * Finaliza a PET oficial e cria o comprovante técnico.
+   * Ativação: clique no botão “Finalizar PET oficial”.
+   * O que faz: exige login/dispositivo autorizado, valida o formulário, assina tecnicamente
+   * o registro, salva localmente e registra a emissão no sistema antes de liberar PDF/comprovante.
    */
   async function finalizeRecord() {
+    const accessOk = await ensureOfficialAccessOrGuide('finalizar a PET oficial');
+    if (!accessOk) return;
+
     const validation = validateCurrentForm();
     showValidation(validation);
     if (!validation.ok) {
@@ -1549,18 +1693,26 @@
     saveRecord(finalizedRecord);
     renderIntegrity(finalizedRecord);
     renderPrintArea(finalizedRecord);
-    $('#registerServerBtn').disabled = false;
-    $('#printBtn').disabled = false;
-    $('#sharePdfBtn').disabled = false;
-    $('#exportBtn').disabled = false;
-    $('#shareJsonBtn').disabled = false;
     localStorage.removeItem(STORAGE_DRAFT);
-    if (authToken()) {
-      registerRecordOnServer(finalizedRecord, { silent: true }).catch(err => renderServerPanel('PET finalizada localmente, mas o registro no D1 falhou: ' + err.message, 'warn'));
-    } else {
-      renderServerPanel('PET finalizada apenas localmente. Faça login e clique em “Registrar hash no D1” para vincular ao servidor.', 'warn');
+
+    try {
+      await registerRecordOnServer(finalizedRecord, { silent: true });
+      $('#registerServerBtn').disabled = true;
+      $('#printBtn').disabled = false;
+      $('#sharePdfBtn').disabled = false;
+      $('#exportBtn').disabled = false;
+      $('#shareJsonBtn').disabled = false;
+      updateFormAccessStatus('PET oficial finalizada e registrada no sistema. Gere o PDF e o comprovante técnico para enviar ao supervisor.', 'ok');
+      alert('PET oficial finalizada e registrada no sistema. Agora gere o PDF e o comprovante técnico e envie ao supervisor responsável.');
+    } catch (err) {
+      $('#registerServerBtn').disabled = false;
+      $('#printBtn').disabled = true;
+      $('#sharePdfBtn').disabled = true;
+      $('#exportBtn').disabled = true;
+      $('#shareJsonBtn').disabled = true;
+      renderServerPanel('A PET foi assinada localmente, mas não foi registrada no sistema: ' + err.message, 'bad');
+      alert('A PET não foi liberada para PDF/comprovante porque o registro no sistema falhou: ' + err.message);
     }
-    alert('PET finalizada, assinada e salva neste dispositivo. Exporte o JSON e salve o PDF para arquivamento/envio ao supervisor.');
   }
 
   /**
@@ -1583,12 +1735,16 @@
 
   /**
    * Gera a prova de PDF e chama a impressão do navegador.
-   * Ativação: botão 'Gerar PDF com prova' ou botão PDF em registros salvos.
+   * Ativação: botão 'Gerar PDF oficial' ou botão PDF em registros salvos.
    * O que faz: coleta IP/GPS/data/hora, assina a prova, atualiza o registro local, prepara
    * um nome de arquivo mais específico no título do documento e executa `window.print()`.
    */
   async function printRecordWithProof(record, triggerButton, options = {}) {
     if (!record) return;
+    if (!options.skipAccessCheck) {
+      const ready = await ensureRecordReadyForOutput(record, 'gerar o PDF oficial');
+      if (!ready) return;
+    }
     const button = triggerButton || $('#printBtn');
     const originalText = button ? button.textContent : '';
     const originalTitle = document.title;
@@ -1609,29 +1765,31 @@
     } finally {
       if (button) {
         button.disabled = false;
-        button.textContent = originalText || 'Gerar PDF com prova';
+        button.textContent = originalText || 'Gerar PDF oficial';
       }
     }
   }
 
   /**
-   * Compartilha o dossiê JSON pela folha nativa de compartilhamento do celular/navegador.
-   * Ativação: botão 'Compartilhar JSON' da PET finalizada ou da aba Registros.
+   * Compartilha o comprovante técnico pela folha nativa de compartilhamento do celular/navegador.
+   * Ativação: botão 'Compartilhar comprovante' da PET finalizada ou da aba Registros.
    * O que faz: cria um arquivo JSON em memória e usa a Web Share API; se o navegador não
    * suportar compartilhamento de arquivos, faz o download como fallback.
    */
   async function shareJsonRecord(record, triggerButton) {
     if (!record) return;
+    const ready = await ensureRecordReadyForOutput(record, 'compartilhar o comprovante técnico');
+    if (!ready) return;
     const button = triggerButton || $('#shareJsonBtn');
     const originalText = button ? button.textContent : '';
     try {
-      if (button) { button.disabled = true; button.textContent = 'Compartilhando JSON...'; }
+      if (button) { button.disabled = true; button.textContent = 'Compartilhando comprovante...'; }
       const file = createJsonFile(record);
-      await shareFilesOrDownload([file], 'Dossiê PET Digital NR-33', `Dossiê JSON da ${record.payload?.fields?.petNumero || record.recordId}.`);
+      await shareFilesOrDownload([file], 'Comprovante PET Digital NR-33', `Comprovante técnico da ${record.payload?.fields?.petNumero || record.recordId}.`);
     } catch (err) {
-      if (err.name !== 'AbortError') alert('Não foi possível compartilhar o JSON: ' + err.message);
+      if (err.name !== 'AbortError') alert('Não foi possível compartilhar o comprovante: ' + err.message);
     } finally {
-      if (button) { button.disabled = false; button.textContent = originalText || 'Compartilhar JSON'; }
+      if (button) { button.disabled = false; button.textContent = originalText || 'Compartilhar comprovante'; }
     }
   }
 
@@ -1644,6 +1802,8 @@
    */
   async function sharePdfRecord(record, triggerButton) {
     if (!record) return;
+    const ready = await ensureRecordReadyForOutput(record, 'compartilhar o PDF oficial');
+    if (!ready) return;
     const button = triggerButton || $('#sharePdfBtn');
     const originalText = button ? button.textContent : '';
     try {
@@ -1655,7 +1815,7 @@
     } catch (err) {
       if (err.name === 'AbortError') return;
       alert('Não foi possível gerar o PDF para compartilhamento direto. O aplicativo abrirá a tela de impressão/salvar PDF do navegador. Motivo: ' + err.message);
-      await printRecordWithProof(record, button, { skipProof: true });
+      await printRecordWithProof(record, button, { skipProof: true, skipAccessCheck: true });
     } finally {
       if (button) { button.disabled = false; button.textContent = originalText || 'Compartilhar PDF'; }
     }
@@ -1747,20 +1907,23 @@
   function renderIntegrity(record) {
     const panel = $('#integrityPanel');
     const proof = latestPdfProof(record);
-    const proofText = proof ? `<br><strong>Última prova de PDF:</strong><br>
+    const proofText = proof ? `<br><strong>Última geração de PDF:</strong><br>
       Data/hora: ${formatDateTime(proof.generatedAt)}<br>
       IP: ${escapeHtml(proof.publicIp || 'não obtido')}<br>
       Geolocalização: ${proof.geolocation?.available ? `${escapeHtml(String(proof.geolocation.latitude))}, ${escapeHtml(String(proof.geolocation.longitude))} ± ${escapeHtml(String(Math.round(proof.geolocation.accuracyMeters || 0)))} m` : escapeHtml(proof.geolocation?.error || 'não obtida')}<br>
-      Hash da prova: <code>${escapeHtml(proof.pdfProofHashSha256)}</code>` : '';
+      <details class="advanced-details"><summary>Detalhes técnicos</summary><code>${escapeHtml(proof.pdfProofHashSha256)}</code></details>` : '';
     panel.classList.remove('hidden');
     const standard = record.payload?.proofStandard || {};
-    panel.innerHTML = `<strong>Registro:</strong> ${escapeHtml(record.recordId)}<br>
-      <strong>Perfil de validação:</strong> ${escapeHtml(standard.validationProfile || VALIDATION_PROFILE)}<br>
-      <strong>JSON canônico:</strong> ${escapeHtml(standard.canonicalizationAlgorithm || CANONICALIZATION_ALGORITHM)}<br>
-      <strong>Hash SHA-256 do dossiê/payload:</strong><br><code>${escapeHtml(record.integrity.payloadHashSha256)}</code><br>
-      <strong>Assinatura criptográfica:</strong> ${escapeHtml(record.integrity.supervisorCryptographicSignature.algorithm)}<br>
-      <strong>Chave pública:</strong> ${escapeHtml(record.integrity.supervisorCryptographicSignature.publicKeyHash)}<br>
-      <strong>Finalizado em:</strong> ${formatDateTime(record.integrity.finalizedAt)}${proofText}`;
+    panel.innerHTML = `<strong>PET finalizada:</strong> ${escapeHtml(record.payload?.fields?.petNumero || record.recordId)}<br>
+      <strong>Código de conferência:</strong> ${escapeHtml(record.recordId)}<br>
+      <strong>Finalizado em:</strong> ${formatDateTime(record.integrity.finalizedAt)}${proofText}
+      <details class="advanced-details"><summary>Detalhes técnicos do comprovante</summary>
+        <strong>Padrão:</strong> ${escapeHtml(standard.validationProfile || VALIDATION_PROFILE)}<br>
+        <strong>Normalização:</strong> ${escapeHtml(standard.canonicalizationAlgorithm || CANONICALIZATION_ALGORITHM)}<br>
+        <strong>Código técnico:</strong><br><code>${escapeHtml(record.integrity.payloadHashSha256)}</code><br>
+        <strong>Assinatura técnica:</strong> ${escapeHtml(record.integrity.supervisorCryptographicSignature.algorithm)}<br>
+        <strong>Dispositivo:</strong> ${escapeHtml(record.integrity.supervisorCryptographicSignature.publicKeyHash)}
+      </details>`;
   }
 
   /**
@@ -1796,7 +1959,7 @@
       : `Não obtida${pdfProof?.geolocation?.error ? ' — ' + pdfProof.geolocation.error : ''}`;
     const pdfProofHtml = pdfProof ? `<strong>Prova de geração do PDF:</strong> ${formatDateTime(pdfProof.generatedAt)} • <strong>IP:</strong> ${escapeHtml(pdfProof.publicIp || 'não obtido')} • <strong>Geolocalização:</strong> ${escapeHtml(geoText)} • <strong>Hash da prova:</strong> ${escapeHtml(pdfProof.pdfProofHashSha256)}` : '<strong>Prova de geração do PDF:</strong> não registrada.';
     const validationCode = `${record.recordId}-${record.integrity.payloadHashSha256.slice(0, 12).toUpperCase()}`;
-    const validationInfoHtml = `<strong>Código de conferência:</strong> ${escapeHtml(validationCode)} • <strong>Perfil:</strong> ${escapeHtml(p.proofStandard?.validationProfile || VALIDATION_PROFILE)} • <strong>Hash:</strong> ${escapeHtml(p.proofStandard?.hashAlgorithm || HASH_ALGORITHM)} • <strong>Assinatura:</strong> ${escapeHtml(p.proofStandard?.signatureAlgorithm || SIGNATURE_ALGORITHM)} • <strong>JSON canônico:</strong> ${escapeHtml(p.proofStandard?.canonicalizationAlgorithm || CANONICALIZATION_ALGORITHM)} • <strong>Validação:</strong> exige o dossiê JSON correspondente.`;
+    const validationInfoHtml = `<strong>Código de conferência:</strong> ${escapeHtml(validationCode)} • <strong>Perfil:</strong> ${escapeHtml(p.proofStandard?.validationProfile || VALIDATION_PROFILE)} • <strong>Hash:</strong> ${escapeHtml(p.proofStandard?.hashAlgorithm || HASH_ALGORITHM)} • <strong>Assinatura:</strong> ${escapeHtml(p.proofStandard?.signatureAlgorithm || SIGNATURE_ALGORITHM)} • <strong>JSON canônico:</strong> ${escapeHtml(p.proofStandard?.canonicalizationAlgorithm || CANONICALIZATION_ALGORITHM)} • <strong>Validação:</strong> exige o comprovante técnico correspondente.`;
 
     area.innerHTML = `
       <div class="print-page">
@@ -1969,9 +2132,9 @@
 
   /**
    * Renderiza a lista de PETs finalizadas neste dispositivo.
-   * Ativação: abrir aba Registros ou clicar em 'Atualizar lista'.
-   * O que faz: monta cartões com número/local/hash e cria ações para PDF, JSON e exclusão
-   * local de cada registro.
+   * Ativação: abrir aba Registros ou clicar em “Atualizar lista”.
+   * O que faz: monta cartões com dados básicos e ações de PDF, comprovante técnico,
+   * registro no sistema e exclusão local.
    */
   function renderRecords() {
     const box = $('#recordsList');
@@ -1983,13 +2146,15 @@
     box.innerHTML = records.map((r, idx) => `<div class="record-item">
       <div><strong>${escapeHtml(r.payload?.fields?.petNumero || r.recordId)}</strong><br>
       Local: ${escapeHtml(r.payload?.fields?.local || '')}<br>
-      Finalizado: ${formatDateTime(r.integrity?.finalizedAt)}<br><small class="record-hash">Hash: ${escapeHtml(r.integrity?.payloadHashSha256 || '')}</small><br><small>Servidor: ${r.serverRegistration ? 'registrado no D1' : 'não registrado'}</small></div>
+      Finalizado: ${formatDateTime(r.integrity?.finalizedAt)}<br>
+      Situação: ${r.serverRegistration ? 'registrado no sistema' : 'pendente de registro no sistema'}
+      <details class="advanced-details"><summary>Detalhes técnicos</summary><small class="record-hash">Código: ${escapeHtml(r.integrity?.payloadHashSha256 || '')}</small></details></div>
       <div class="actions">
         <button type="button" class="small secondary" data-record-action="print" data-index="${idx}">PDF</button>
         <button type="button" class="small secondary" data-record-action="sharePdf" data-index="${idx}">Compartilhar PDF</button>
-        <button type="button" class="small secondary" data-record-action="export" data-index="${idx}">JSON</button>
-        <button type="button" class="small secondary" data-record-action="shareJson" data-index="${idx}">Compartilhar JSON</button>
-        <button type="button" class="small ghost" data-record-action="registerServer" data-index="${idx}">Registrar D1</button>
+        <button type="button" class="small secondary" data-record-action="export" data-index="${idx}">Comprovante</button>
+        <button type="button" class="small secondary" data-record-action="shareJson" data-index="${idx}">Compartilhar comprovante</button>
+        <button type="button" class="small ghost" data-record-action="registerServer" data-index="${idx}">Registrar no sistema</button>
         <button type="button" class="small danger ghost" data-record-action="delete" data-index="${idx}">Excluir local</button>
       </div>
     </div>`).join('');
@@ -2007,7 +2172,11 @@
         finalizedRecord = rec;
         await sharePdfRecord(rec, btn);
       }
-      if (btn.dataset.recordAction === 'export') downloadJson(rec, jsonFilename(rec));
+      if (btn.dataset.recordAction === 'export') {
+        finalizedRecord = rec;
+        const ready = await ensureRecordReadyForOutput(rec, 'salvar o comprovante técnico');
+        if (ready) downloadJson(rec, jsonFilename(rec));
+      }
       if (btn.dataset.recordAction === 'shareJson') await shareJsonRecord(rec, btn);
       if (btn.dataset.recordAction === 'registerServer') await registerRecordOnServer(rec);
       if (btn.dataset.recordAction === 'delete') {
@@ -2021,7 +2190,7 @@
   }
 
   /**
-   * Valida um dossiê JSON importado pelo usuário.
+   * Valida um comprovante técnico importado pelo usuário.
    * Ativação: seleção de arquivo na aba 'Validar'.
    * O que faz: recalcula o hash do payload, verifica a assinatura da PET e também valida
    * cada prova de PDF existente, exibindo o resultado na tela.
@@ -2064,20 +2233,19 @@
       }
       const allOk = standardOk && hashMatches && signatureOk && allProofsOk;
       result.className = 'validation-box ' + (allOk ? 'ok' : 'bad');
-      result.textContent = `${allOk ? 'Dossiê íntegro e assinatura criptográfica válida.' : 'Falha de validação.'}\n\n` +
-        `Registro: ${record.recordId || '-'}\n` +
+      const technicalText = `Registro: ${record.recordId || '-'}\n` +
         `Perfil de validação: ${record.payload.proofStandard?.validationProfile || '-'}\n` +
-        `JSON canônico: ${record.payload.proofStandard?.canonicalizationAlgorithm || CANONICALIZATION_ALGORITHM}\n` +
-        `Hash: ${record.payload.proofStandard?.hashAlgorithm || HASH_ALGORITHM}\n` +
-        `Assinatura: ${record.payload.proofStandard?.signatureAlgorithm || SIGNATURE_ALGORITHM}\n` +
+        `Normalização: ${record.payload.proofStandard?.canonicalizationAlgorithm || CANONICALIZATION_ALGORITHM}\n` +
+        `Algoritmo: ${record.payload.proofStandard?.hashAlgorithm || HASH_ALGORITHM} / ${record.payload.proofStandard?.signatureAlgorithm || SIGNATURE_ALGORITHM}\n` +
         (standardCheck.errors.length ? `Padrão incompatível: ${standardCheck.errors.join(' | ')}\n` : '') +
         (standardCheck.warnings.length ? `Avisos: ${standardCheck.warnings.join(' | ')}\n` : '') +
-        `Hash informado: ${record.integrity.payloadHashSha256}\n` +
-        `Hash recalculado: ${recalculated}\n` +
-        `Hash confere: ${hashMatches ? 'SIM' : 'NÃO'}\n` +
-        `Assinatura confere: ${signatureOk ? 'SIM' : 'NÃO'}\n` +
+        `Código informado: ${record.integrity.payloadHashSha256}\n` +
+        `Código recalculado: ${recalculated}\n` +
+        `Código confere: ${hashMatches ? 'SIM' : 'NÃO'}\n` +
+        `Assinatura técnica confere: ${signatureOk ? 'SIM' : 'NÃO'}\n` +
         `Finalizado em: ${formatDateTime(record.integrity.finalizedAt)}` +
-        (proofs.length ? `\n${proofLines.join('\n')}` : '\n\nSem prova de geração de PDF registrada no JSON.');
+        (proofs.length ? `\n${proofLines.join('\n')}` : '\n\nSem prova de geração de PDF registrada no comprovante.');
+      result.innerHTML = `<strong>${allOk ? 'Comprovante íntegro e assinatura técnica válida.' : 'Falha de validação.'}</strong><br>Registro: ${escapeHtml(record.recordId || '-')}<br>Finalizado em: ${formatDateTime(record.integrity.finalizedAt)}<details class="advanced-details"><summary>Detalhes técnicos</summary><pre>${escapeHtml(technicalText)}</pre></details>`;
     } catch (err) {
       result.className = 'validation-box bad';
       result.textContent = 'Não foi possível validar: ' + err.message;
@@ -2094,7 +2262,7 @@
    */
   async function exportPublicKey() {
     const key = await ensureKeyPair();
-    downloadJson({ algorithm: key.algorithm, createdAt: key.createdAt, publicKeyHash: key.publicKeyHash, publicKey: key.publicKey }, 'chave_publica_pet_digital.json');
+    downloadJson({ algorithm: key.algorithm, createdAt: key.createdAt, publicKeyHash: key.publicKeyHash, publicKey: key.publicKey }, 'dados_autorizacao_dispositivo_pet_digital.json');
   }
 
   /**
@@ -2107,10 +2275,10 @@
     const box = $('#keyStatus');
     const key = await readLocalKeyPair();
     if (!key) {
-      box.innerHTML = '<p class="hint">Nenhuma chave local criada. A chave será gerada automaticamente na primeira finalização. A chave privada será não exportável e ficará no IndexedDB deste dispositivo.</p>';
+      box.innerHTML = '<p class="hint">Este dispositivo ainda não foi preparado. Ele será preparado automaticamente ao autorizar o dispositivo ou ao tentar finalizar uma PET oficial.</p>';
       return;
     }
-    box.innerHTML = `<p><strong>Chave ativa:</strong> ${escapeHtml(key.algorithm)}<br><strong>Armazenamento:</strong> ${escapeHtml(key.storage || 'IndexedDB')}<br><strong>Criada em:</strong> ${formatDateTime(key.createdAt)}<br><strong>Hash da chave pública:</strong> <span class="hash-text">${escapeHtml(key.publicKeyHash)}</span></p><pre>${escapeHtml(JSON.stringify({ publicKeyHash: key.publicKeyHash, publicKey: key.publicKey }, null, 2))}</pre>`;
+    box.innerHTML = `<p><strong>Dispositivo preparado:</strong> sim<br><strong>Armazenamento:</strong> ${escapeHtml(key.storage || 'local seguro do navegador')}<br><strong>Criado em:</strong> ${formatDateTime(key.createdAt)}</p><details class="advanced-details"><summary>Detalhes técnicos</summary><strong>Algoritmo:</strong> ${escapeHtml(key.algorithm)}<br><strong>Código do dispositivo:</strong> <span class="hash-text">${escapeHtml(key.publicKeyHash)}</span><pre>${escapeHtml(JSON.stringify({ publicKeyHash: key.publicKeyHash, publicKey: key.publicKey }, null, 2))}</pre></details>`;
   }
 
   /**
@@ -2130,7 +2298,7 @@
   /** Retorna o nome sugerido para o PDF da PET. */
   function pdfFilename(record) { return `${recordFileStem(record)}.pdf`; }
 
-  /** Retorna o nome sugerido para o dossiê JSON da PET. */
+  /** Retorna o nome sugerido para o comprovante técnico da PET. */
   function jsonFilename(record) { return `${recordFileStem(record)}_dossie.json`; }
 
   /** Cria um File JSON em memória para compartilhamento nativo. */
@@ -2162,7 +2330,7 @@
 
   /**
    * Compartilha arquivos pela Web Share API ou baixa como fallback.
-   * Ativação: botões de compartilhamento de PDF/JSON.
+   * Ativação: botões de compartilhamento de PDF/comprovante técnico.
    * O que faz: tenta abrir a folha nativa de compartilhamento do celular; quando o navegador
    * não suporta arquivos, salva os arquivos localmente para o usuário encaminhar manualmente.
    */

@@ -1,52 +1,42 @@
-# PET-Digital NR-33 v1.1.0
+# PET-Digital NR-33 v1.1.1
 
-Esta versão adiciona integração com **Cloudflare Worker + D1**, mantendo o aplicativo visual no **Cloudflare Pages**.
+Versão com fluxo mais próximo de produção para uso com **Cloudflare Pages + Cloudflare Worker + D1**.
 
 ## URLs configuradas
 
 - Worker/API: `https://pet-digital-api.nicholas-dmae.workers.dev`
 - Pages/frontend: `https://pet-digital.pages.dev`
 
-## O que muda na v1.1.0
+## O que muda na v1.1.1
 
-- Login simples por matrícula/senha.
-- Perfis: `admin`, `gestor`, `verificador`, `operacional`.
-- Chave privada local **não exportável**, armazenada via Web Crypto + IndexedDB.
-- Registro da chave pública do dispositivo no D1.
-- Aprovação/revogação de dispositivos por admin/gestor.
-- Registro no D1 de hashes e auditoria mínima.
-- Não salva PDF, JSON, foto ou assinatura desenhada no D1.
-- O PDF e JSON continuam sendo compartilhados manualmente com o supervisor.
+- A PET oficial agora exige **login** antes da finalização.
+- A geração do **PDF oficial** e do **comprovante técnico** fica bloqueada sem usuário conectado e dispositivo autorizado.
+- A interface foi simplificada para o usuário final, evitando termos técnicos na tela principal.
+- Termos técnicos foram recolhidos em áreas de “Detalhes técnicos”.
+- O botão “Registrar hash no D1” foi trocado por “Registrar no sistema”.
+- O “JSON” passou a ser apresentado como **comprovante técnico**.
+- O Worker foi ajustado para `PBKDF2` com **100.000 iterações**, compatível com o limite do Cloudflare Workers.
+- Mantém comentários no padrão **O quê / Como / Quando**.
 
-## Pastas
+## Fluxo de uso recomendado
 
-```text
-frontend/    App para publicar no Cloudflare Pages
-worker/      API para colar/deployar no Worker pet-digital-api
-migrations/  SQL auxiliar para ajustar perfis do D1, se necessário
-docs/        Orientações de configuração e teste
-```
+1. Abrir o app no Cloudflare Pages.
+2. Entrar com matrícula e senha.
+3. Autorizar o dispositivo.
+4. Aguardar aprovação, se o usuário for operacional/verificador.
+5. Preencher a PET.
+6. Capturar foto e assinatura dos participantes.
+7. Finalizar a PET oficial.
+8. Gerar/compartilhar o PDF oficial.
+9. Salvar/compartilhar o comprovante técnico.
+10. Enviar PDF + comprovante técnico ao supervisor imediato.
 
-## Fluxo recomendado
+## Publicação
 
-1. Substitua o código do Worker por `worker/src/index.js`.
-2. Confirme no Worker:
-   - binding D1 `DB` → `pet_digital_db`;
-   - variables;
-   - secrets.
-3. Se necessário, rode `migrations/0002_roles_v110.sql` no console do D1.
-4. Publique a pasta `frontend/` no Cloudflare Pages.
-5. Acesse o app → aba **Sistema** → crie o primeiro admin.
-6. Faça login.
-7. Gere a chave do dispositivo e registre a chave pública.
-8. Aprove a chave, se ela ficar pendente.
-9. Finalize uma PET e registre o hash no D1.
+- Publique a pasta `frontend/` no Cloudflare Pages.
+- No Worker `pet-digital-api`, substitua o código atual por `worker/src/index.js` ou pelo arquivo avulso `worker-pet-digital-api-v1.1.1.js`.
+- Confirme se o binding do D1 continua como `DB`.
 
-## Aviso operacional recomendado
+## Aviso operacional
 
-Os dados da PET ficam armazenados temporariamente no dispositivo. Após gerar a PET, envie imediatamente o PDF e o JSON ao supervisor responsável. A limpeza do navegador, troca de aparelho ou atualização do sistema pode apagar registros locais.
-
-
-## Versão comentada
-
-Esta variação mantém a lógica da v1.1.0, mas adiciona comentários no padrão **O quê / Como / Quando** no frontend, Worker, HTML, CSS, Service Worker e um mapa em `docs/MAPA_DO_CODIGO_v110_COMENTADO.md`.
+Os dados da PET ficam armazenados temporariamente no dispositivo. Após gerar a PET, envie imediatamente o PDF e o comprovante técnico ao supervisor responsável. A limpeza do navegador, troca de aparelho ou atualização do sistema pode apagar registros locais.

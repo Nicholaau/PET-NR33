@@ -219,9 +219,15 @@ th { background: #dde5ef; color: #172033; text-align: center; }
   .print-logo small { display: block; font-size: 8px; line-height: 1.15; }
 }
 
-/* Integração v1.1.0 com Worker/D1. */
+/* Integração v1.1.1 com Worker/D1. */
 .auth-admin-grid h3 { color: var(--primary); margin-top: 0; }
 #apiBaseLabel, .hash-text { overflow-wrap: anywhere; word-break: break-word; }
 #serverPanel.validation-box { white-space: pre-wrap; }
 #usersList .record-item, #devicesList .record-item { grid-template-columns: minmax(0, 1fr) auto; }
 @media (max-width: 860px) { #usersList .record-item, #devicesList .record-item { grid-template-columns: 1fr; } }
+
+/* Ajustes v1.1.1: fluxo guiado e termos técnicos recolhidos. */
+.auth-gate-card { border-left: 5px solid var(--primary); }
+.advanced-details { margin-top: 8px; color: var(--muted); }
+.advanced-details summary { cursor: pointer; font-weight: 700; color: var(--primary); }
+.advanced-details code, .advanced-details pre { overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; }

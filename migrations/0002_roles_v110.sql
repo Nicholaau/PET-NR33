@@ -1,4 +1,4 @@
--- PET-Digital NR-33 v1.1.0
+-- PET-Digital NR-33 v1.1.1
 -- Ajusta perfis de login para: admin, gestor, verificador e operacional.
 -- Use esta migration se sua tabela app_users ainda foi criada com perfis antigos
 -- como supervisor/entrante/vigia.

@@ -1,79 +1,65 @@
-# Instalação e teste — PET-Digital v1.1.0
+# Instalação e teste — PET-Digital v1.1.1
 
-## 1. Worker
+## 1. Worker/API
 
-Abra o Worker `pet-digital-api` no painel da Cloudflare e substitua o código pelo conteúdo de:
+No Worker `pet-digital-api`, substitua o código atual pelo conteúdo de:
 
 ```text
 worker/src/index.js
 ```
 
-Depois faça deploy.
+ou copie o arquivo avulso:
 
-## 2. Conferir rotas de teste
+```text
+worker-pet-digital-api-v1.1.1.js
+```
 
-Abra no navegador:
+Faça o deploy.
+
+Teste:
 
 ```text
 https://pet-digital-api.nicholas-dmae.workers.dev/health
-```
-
-Depois:
-
-```text
 https://pet-digital-api.nicholas-dmae.workers.dev/db-test
 ```
 
-## 3. Conferir variável CORS
+## 2. Cloudflare Pages
 
-No Worker, a variável deve ser:
-
-```text
-CORS_ALLOWED_ORIGIN = https://pet-digital.pages.dev
-```
-
-Sem barra final.
-
-## 4. Primeiro admin
-
-No app, vá em **Sistema → Primeiro administrador** e informe o `BOOTSTRAP_ADMIN_TOKEN` que você configurou como Secret no Worker.
-
-Depois use a matrícula e senha cadastradas para fazer login.
-
-## 5. Dispositivo/chave
-
-Na aba **Sistema**, registre a chave pública do dispositivo.
-
-- Admin/gestor: chave fica ativa automaticamente.
-- Operacional/verificador: chave fica pendente e precisa aprovação de admin/gestor.
-
-## 6. Registro de PET
-
-Finalize a PET normalmente. Se estiver logado e a chave estiver ativa, o app tentará registrar automaticamente o hash no D1.
-
-Também é possível usar o botão:
+Publique a pasta:
 
 ```text
-Registrar hash no D1
+frontend/
 ```
 
-## 7. O que fica no D1
+URL esperada:
 
-Ficam salvos:
+```text
+https://pet-digital.pages.dev
+```
 
-- usuário;
-- chave pública e hash da chave;
-- número da PET;
-- hash do payload;
-- hash da prova do PDF, quando houver;
-- assinatura criptográfica em base64;
-- IP e data/hora do servidor;
-- hashes das fotos/assinaturas dos participantes;
-- auditoria mínima.
+## 3. Banco D1
 
-Não ficam salvos:
+Não há migration obrigatória nova da v1.1.0 para a v1.1.1.
 
-- PDF;
-- JSON completo;
-- fotos;
-- imagens de assinatura.
+Confirme apenas que as tabelas existem:
+
+```sql
+SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;
+```
+
+## 4. Teste funcional
+
+1. Criar primeiro admin, se ainda não existir.
+2. Fazer login.
+3. Autorizar o dispositivo.
+4. Cadastrar usuário operacional, se necessário.
+5. Preencher uma PET fictícia.
+6. Tentar finalizar sem dispositivo aprovado para confirmar o bloqueio.
+7. Aprovar o dispositivo.
+8. Finalizar PET oficial.
+9. Gerar PDF oficial.
+10. Salvar/compartilhar o comprovante técnico.
+
+## 5. Observação
+
+A v1.1.1 não guarda PDF, comprovante técnico, fotos ou assinaturas desenhadas no banco. O sistema registra apenas metadados, códigos técnicos e auditoria mínima.
