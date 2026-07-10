@@ -1,121 +1,47 @@
-# PET Digital — NR-33 — DMAE
+# PET-Digital NR-33 v1.1.0
 
-Versão: 1.0.5
+Esta versão adiciona integração com **Cloudflare Worker + D1**, mantendo o aplicativo visual no **Cloudflare Pages**.
 
-Aplicação PWA estática para preenchimento de Permissão de Entrada e Trabalho (PET) em espaços confinados, com foto dos participantes, assinatura manuscrita em tela, hash SHA-256, assinatura criptográfica local ECDSA P-256, prova de geração do PDF e validação por dossiê JSON.
+## URLs configuradas
 
+- Worker/API: `https://pet-digital-api.nicholas-dmae.workers.dev`
+- Pages/frontend: `https://pet-digital.pages.dev`
 
-## Alterações da versão 1.0.5
+## O que muda na v1.1.0
 
-- Adicionada verificação real do canvas antes de registrar assinatura: canvas vazio ou com marca acidental muito pequena não é aceito.
-- Assinaturas agora salvam métricas mínimas de validação do traço, além do hash da imagem.
-- Todos os entrantes/vigias adicionados passam a ser tratados como participantes obrigatórios da PET: nome, matrícula, foto e assinatura são exigidos para cada cartão exibido.
-- Se o usuário alterar o formulário após finalizar a PET, os botões de PDF/JSON são desabilitados até nova validação/finalização, evitando compartilhar dossiê antigo.
-- Incluídos avisos contra uso não intencional: matrícula repetida, divergência entre nome do supervisor no cabeçalho e no cartão de assinatura, detector sem identificação/calibração informada, e assinatura alterada no canvas sem novo registro.
-- Cache do Service Worker atualizado para `v1.0.5`.
+- Login simples por matrícula/senha.
+- Perfis: `admin`, `gestor`, `verificador`, `operacional`.
+- Chave privada local **não exportável**, armazenada via Web Crypto + IndexedDB.
+- Registro da chave pública do dispositivo no D1.
+- Aprovação/revogação de dispositivos por admin/gestor.
+- Registro no D1 de hashes e auditoria mínima.
+- Não salva PDF, JSON, foto ou assinatura desenhada no D1.
+- O PDF e JSON continuam sendo compartilhados manualmente com o supervisor.
 
-## Alterações da versão 1.0.4
+## Pastas
 
-- Incluídos botões de **Compartilhar PDF** e **Compartilhar JSON** usando a Web Share API quando suportada pelo navegador.
-- O compartilhamento do JSON cria um arquivo `.json` em memória e abre a folha nativa de compartilhamento do celular.
-- O compartilhamento do PDF tenta gerar um arquivo PDF real no navegador com `html2canvas`/`jsPDF`; se o navegador/rede não permitir, mantém o fallback de impressão/salvar PDF.
-- O nome sugerido para o PDF foi customizado com número da PET, data, local e identificador do registro.
-- O nome do JSON também foi padronizado para acompanhar o PDF.
-- Ajustado o layout da aba **Chave** para quebrar hashes longos sem sair da tela.
-- Ajustado o layout da aba **Registros** para quebrar hashes longos nos cartões.
-- Ajustada a seção **Medições de gases perigosos** em celular: a tabela vira cartões verticais, eliminando rolagem lateral.
-- Rodapé/interface com linguagem mais operacional, sem referência visual a ambiente de desenvolvimento.
-- Cache do Service Worker atualizado para `v1.0.4`.
+```text
+frontend/    App para publicar no Cloudflare Pages
+worker/      API para colar/deployar no Worker pet-digital-api
+migrations/  SQL auxiliar para ajustar perfis do D1, se necessário
+docs/        Orientações de configuração e teste
+```
 
-## Alterações da versão 1.0.3
+## Fluxo recomendado
 
-- Incluída a logomarca do DMAE na interface e no PDF.
-- Ajustada a apresentação visual para ficar mais próxima de ambiente operacional.
-- Removidos textos de interface que tratavam a aplicação como ambiente preliminar.
-- Incluído no dossiê JSON o padrão técnico de validação usado pelo aplicativo:
-  - perfil de validação;
-  - versão do schema;
-  - regra de JSON canônico;
-  - algoritmo de hash;
-  - algoritmo de assinatura;
-  - formato da chave pública;
-  - formato das assinaturas e imagens.
-- O padrão técnico passou a entrar no payload assinado, de modo que sua alteração posterior invalida o hash.
-- O validador passou a conferir se o dossiê usa o padrão técnico aceito pela aplicação, sem confiar cegamente no algoritmo declarado no próprio arquivo.
-- O PDF passou a exibir código de conferência e resumo do padrão de validação, reforçando que a verificação técnica completa exige o JSON correspondente.
-- Cache do Service Worker atualizado para `v1.0.3`, incluindo a logomarca no app shell offline.
+1. Substitua o código do Worker por `worker/src/index.js`.
+2. Confirme no Worker:
+   - binding D1 `DB` → `pet_digital_db`;
+   - variables;
+   - secrets.
+3. Se necessário, rode `migrations/0002_roles_v110.sql` no console do D1.
+4. Publique a pasta `frontend/` no Cloudflare Pages.
+5. Acesse o app → aba **Sistema** → crie o primeiro admin.
+6. Faça login.
+7. Gere a chave do dispositivo e registre a chave pública.
+8. Aprove a chave, se ela ficar pendente.
+9. Finalize uma PET e registre o hash no D1.
 
-## Alterações da versão 1.0.2
+## Aviso operacional recomendado
 
-- Incluída captura/seleção de foto para entrantes, vigias e supervisor.
-- Foto, assinatura, data/hora da assinatura, nome e matrícula entram no hash do dossiê.
-- O PDF exibe a foto do servidor ao lado da assinatura.
-- O botão **Gerar PDF com prova** coleta data/hora, IP público e geolocalização no momento da geração do PDF.
-- A prova de geração do PDF recebe hash SHA-256 próprio e assinatura criptográfica ECDSA P-256.
-- A tela **Validar** verifica também o hash e a assinatura da prova de geração do PDF, quando ela existir no JSON.
-
-Observação: IP público depende de conexão com internet. Geolocalização depende de HTTPS/localhost, permissão do usuário e disponibilidade do GPS/rede do dispositivo.
-
-## Alterações da versão 1.0.1
-
-- Removido o campo manual de número da PET; o número agora é gerado automaticamente ao finalizar o registro.
-- Removido o campo de número do espaço confinado.
-- Removida a coleta/campo de localização GPS no formulário.
-- Relação de profissionais iniciando com 1 entrante, 1 vigia e 1 supervisor.
-- Incluídos botões para adicionar novos entrantes e novos vigias conforme a necessidade da equipe.
-
-## Arquivos incluídos
-
-- `index.html`: tela principal do aplicativo.
-- `styles.css`: layout responsivo e modelo de impressão A4 paisagem.
-- `app.js`: regras de validação, assinaturas, hash, exportação JSON e verificação.
-- `sw.js`: Service Worker com cache versionado para uso offline.
-- `manifest.json`: manifesto PWA.
-- `logo-dmae-2026.png`: logomarca utilizada na interface e no PDF.
-
-## Como usar localmente
-
-1. Extraia o ZIP.
-2. Abra a pasta em um servidor local. Exemplo:
-   ```bash
-   python3 -m http.server 8080
-   ```
-3. Acesse `http://localhost:8080`.
-4. Preencha a PET, registre as fotos, colete as assinaturas, clique em **Validar** e depois em **Finalizar e assinar PET**.
-5. Clique em **Gerar PDF com prova**.
-6. Exporte o **dossiê JSON** e salve o PDF gerado pelo navegador.
-
-## Como publicar no Cloudflare Pages
-
-1. Crie um projeto no Cloudflare Pages.
-2. Faça upload desta pasta ou conecte a um repositório Git contendo estes arquivos.
-3. Build command: deixe em branco.
-4. Output directory: `/` ou a pasta que contém os arquivos.
-5. Publique.
-
-## Estrutura probatória
-
-O aplicativo gera um dossiê JSON contendo:
-
-- dados preenchidos da PET;
-- checklist;
-- medições de gases;
-- fotos dos participantes;
-- assinaturas manuscritas em Base64;
-- data/hora das fotos e assinaturas;
-- padrão técnico de validação;
-- hash SHA-256 do payload;
-- assinatura criptográfica ECDSA P-256 do hash;
-- chave pública para verificação;
-- prova de geração do PDF, com data/hora, IP público, geolocalização, hash próprio e assinatura criptográfica.
-
-Na tela **Validar**, o aplicativo recalcula o hash do JSON, confere o padrão técnico declarado e verifica as assinaturas criptográficas. Se qualquer dado, foto, assinatura desenhada ou prova do PDF for alterado, a validação falha.
-
-## Observações institucionais
-
-Para conferência técnica completa, mantenha sempre o par:
-
-- PDF: via visual do documento;
-- JSON: dossiê probatório usado para validação.
-
-A aplicação foi estruturada para funcionar sem login e sem banco de dados, adequada à publicação estática no Cloudflare Pages. A validação jurídica, de segurança do trabalho e de guarda documental deve ser feita pelas áreas competentes antes do uso oficial como procedimento institucional.
+Os dados da PET ficam armazenados temporariamente no dispositivo. Após gerar a PET, envie imediatamente o PDF e o JSON ao supervisor responsável. A limpeza do navegador, troca de aparelho ou atualização do sistema pode apagar registros locais.

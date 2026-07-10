@@ -1,0 +1,19 @@
+name = "pet-digital-api"
+main = "src/index.js"
+compatibility_date = "2026-07-10"
+
+# Configure também pelo painel, se preferir.
+# O binding precisa se chamar DB.
+[[d1_databases]]
+binding = "DB"
+database_name = "pet_digital_db"
+database_id = "COLE_AQUI_O_ID_DO_D1_SE_USAR_WRANGLER"
+
+[vars]
+APP_NAME = "PET-DIGITAL-NR33"
+APP_ENV = "production"
+VALIDATION_PROFILE = "PET-DIGITAL-NR33-v1"
+SESSION_COOKIE_NAME = "pet_session"
+SESSION_TTL_SECONDS = "28800"
+CHALLENGE_TTL_SECONDS = "300"
+CORS_ALLOWED_ORIGIN = "https://pet-digital.pages.dev"

@@ -1,0 +1,10 @@
+{
+  "name": "PET Digital NR-33 — DMAE",
+  "short_name": "PET Digital",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#eef3f8",
+  "theme_color": "#0b3a66",
+  "description": "Permissão de Entrada e Trabalho para Espaços Confinados — NR-33 — DMAE",
+  "icons": []
+}
