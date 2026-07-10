@@ -31,7 +31,7 @@
  */
 
 // Quantidade de iterações do PBKDF2 para dificultar ataque de força bruta em senhas.
-const PASSWORD_ITERATIONS = 120000;
+const PASSWORD_ITERATIONS = 100000;
 // Tamanho do token de sessão aleatório em bytes. 32 bytes = token forte para uso temporário.
 const SESSION_BYTES = 32;
 // Tempo padrão de sessão em segundos, usado se a variável SESSION_TTL_SECONDS não existir.
