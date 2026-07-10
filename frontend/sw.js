@@ -1,3 +1,14 @@
+/**
+ * Service Worker do PET-Digital NR-33.
+ *
+ * O quê: permite que o aplicativo abra mais rapidamente e funcione mesmo com internet instável.
+ * Como: guarda em cache os arquivos principais do app e remove caches antigos em atualizações.
+ * Quando: o navegador instala este arquivo após o primeiro acesso ao Cloudflare Pages.
+ *
+ * Atenção: em produção, mudanças no cache devem ser feitas com cuidado para não prender o usuário
+ * em versão antiga. Por isso o nome do cache inclui a versão.
+ */
+
 /*
  * Service Worker do PET Digital NR-33.
  *

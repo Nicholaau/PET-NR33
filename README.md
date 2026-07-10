@@ -45,3 +45,8 @@ docs/        Orientações de configuração e teste
 ## Aviso operacional recomendado
 
 Os dados da PET ficam armazenados temporariamente no dispositivo. Após gerar a PET, envie imediatamente o PDF e o JSON ao supervisor responsável. A limpeza do navegador, troca de aparelho ou atualização do sistema pode apagar registros locais.
+
+
+## Versão comentada
+
+Esta variação mantém a lógica da v1.1.0, mas adiciona comentários no padrão **O quê / Como / Quando** no frontend, Worker, HTML, CSS, Service Worker e um mapa em `docs/MAPA_DO_CODIGO_v110_COMENTADO.md`.

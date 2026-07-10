@@ -2,7 +2,7 @@
   'use strict';
 
   /**
-   * PET Digital NR-33 v1.1.0.
+   * PET Digital NR-33 v1.1.0 — frontend comentado.
    *
    * Visão geral do arquivo:
    * - Este app é um PWA estático: não depende de servidor próprio para preencher, assinar,
@@ -14,7 +14,7 @@
    * - Foto, assinatura desenhada, dados do formulário e prova de geração do PDF entram
    *   no material que é hasheado e assinado criptograficamente.
    *
-   * Observação: os comentários abaixo foram mantidos para facilitar auditoria,
+   * Observação: os comentários foram escritos no padrão 'O quê / Como / Quando' para facilitar auditoria,
    * revisão técnica e evolução controlada do código.
    */
 
