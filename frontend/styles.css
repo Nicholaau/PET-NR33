@@ -231,3 +231,34 @@ th { background: #dde5ef; color: #172033; text-align: center; }
 .advanced-details { margin-top: 8px; color: var(--muted); }
 .advanced-details summary { cursor: pointer; font-weight: 700; color: var(--primary); }
 .advanced-details code, .advanced-details pre { overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; }
+
+/* Ajustes v1.1.2: tela inicial de login antes do preenchimento da PET. */
+.login-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: radial-gradient(circle at top, #ffffff 0, #eef3f8 55%, #dce8f4 100%);
+}
+.login-card {
+  width: min(980px, 100%);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 22px;
+  box-shadow: 0 16px 42px rgba(10, 30, 60, .12);
+}
+.login-brand { text-align: center; margin-bottom: 16px; }
+.login-logo { max-width: 280px; width: 80%; max-height: 110px; object-fit: contain; margin: 0 auto 10px; display: block; }
+.login-brand h1 { margin-bottom: 4px; }
+.login-brand p { color: var(--muted); margin-bottom: 0; }
+.login-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); gap: 14px; margin-top: 14px; }
+.login-panel { border: 1px solid var(--line); border-radius: 16px; padding: 16px; background: var(--soft); }
+.login-panel summary { cursor: pointer; font-weight: 800; color: var(--primary); }
+.photo-note { color: var(--muted); font-size: 12px; margin: 4px 0 8px; line-height: 1.35; }
+@media (max-width: 760px) {
+  .login-screen { align-items: flex-start; padding: 14px; }
+  .login-grid { grid-template-columns: 1fr; }
+  .login-card { padding: 16px; }
+}

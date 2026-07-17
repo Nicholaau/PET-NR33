@@ -1,4 +1,4 @@
-# Instalação e teste — PET-Digital v1.1.1
+# Instalação e teste — PET-Digital v1.1.2
 
 ## 1. Worker/API
 
@@ -11,7 +11,7 @@ worker/src/index.js
 ou copie o arquivo avulso:
 
 ```text
-worker-pet-digital-api-v1.1.1.js
+worker-pet-digital-api-v1.1.2.js
 ```
 
 Faça o deploy.
@@ -39,7 +39,7 @@ https://pet-digital.pages.dev
 
 ## 3. Banco D1
 
-Não há migration obrigatória nova da v1.1.0 para a v1.1.1.
+Não há migration obrigatória nova da v1.1.0 para a v1.1.2.
 
 Confirme apenas que as tabelas existem:
 
@@ -62,4 +62,4 @@ SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;
 
 ## 5. Observação
 
-A v1.1.1 não guarda PDF, comprovante técnico, fotos ou assinaturas desenhadas no banco. O sistema registra apenas metadados, códigos técnicos e auditoria mínima.
+A v1.1.2 não guarda PDF, comprovante técnico, fotos ou assinaturas desenhadas no banco. O sistema registra apenas metadados, códigos técnicos e auditoria mínima.

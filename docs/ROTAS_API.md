@@ -1,4 +1,4 @@
-# Rotas da API v1.1.1
+# Rotas da API v1.1.2
 
 Principais rotas do Worker:
 
@@ -22,4 +22,4 @@ POST /validate
 GET  /audit
 ```
 
-A v1.1.1 mantém a mesma API da v1.1.0, com ajuste no fluxo do frontend e compatibilidade do PBKDF2 no Worker.
+A v1.1.2 mantém a mesma API da v1.1.0, com ajuste no fluxo do frontend e compatibilidade do PBKDF2 no Worker.

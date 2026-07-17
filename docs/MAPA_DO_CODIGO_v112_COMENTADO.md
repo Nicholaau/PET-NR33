@@ -1,4 +1,4 @@
-# Mapa do Código — PET-Digital NR-33 v1.1.1 comentado
+# Mapa do Código — PET-Digital NR-33 v1.1.2 comentado
 
 ## Frontend
 
@@ -10,9 +10,9 @@
 ## Worker
 
 - `worker/src/index.js`: API Cloudflare Worker.
-- `worker-pet-digital-api-v1.1.1.js`: cópia avulsa do mesmo código para colar direto no painel da Cloudflare.
+- `worker-pet-digital-api-v1.1.2.js`: cópia avulsa do mesmo código para colar direto no painel da Cloudflare.
 
-## Fluxo v1.1.1
+## Fluxo v1.1.2
 
 1. Usuário faz login.
 2. Dispositivo é preparado localmente.

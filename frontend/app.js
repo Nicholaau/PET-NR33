@@ -2,7 +2,7 @@
   'use strict';
 
   /**
-   * PET Digital NR-33 v1.1.1 — frontend comentado.
+   * PET Digital NR-33 v1.1.2 — frontend comentado.
    *
    * Visão geral do arquivo:
    * - Este app é um PWA estático: não depende de servidor próprio para preencher, assinar,
@@ -19,12 +19,12 @@
    */
 
   // Versão funcional gravada no dossiê e exibida nos elementos de prova.
-  const APP_VERSION = '1.1.1';
+  const APP_VERSION = '1.1.2';
 
   // Perfil técnico aceito pelo próprio validador. Esses valores padronizam como o hash
   // é calculado, qual algoritmo assina o registro e como outro validador deve conferir.
   const VALIDATION_PROFILE = 'PET-DIGITAL-NR33-PROOF/v1';
-  const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.1.1';
+  const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.1.2';
   const RECORD_TYPE = 'PET-DIGITAL-DOSSIE/v1';
   const HASH_ALGORITHM = 'SHA-256';
   const SIGNATURE_ALGORITHM = 'ECDSA-P256-SHA256';
@@ -44,7 +44,7 @@
   };
 
   // Chaves usadas no localStorage para separar rascunhos, registros finalizados e chave criptográfica.
-  const STORAGE_DRAFT = 'petDigitalDraftV6';
+  const STORAGE_DRAFT = 'petDigitalDraftV7';
   const STORAGE_RECORDS = 'petDigitalRecordsV1';
   const STORAGE_KEYPAIR = 'petDigitalKeyPairV2';
   const STORAGE_AUTH = 'petDigitalAuthV1';
@@ -369,22 +369,47 @@
     return data;
   }
 
-  /** Atualiza a interface de login e o aviso da tela principal. */
+  /** Atualiza a interface de login e a liberação da área principal.
+   * O quê: controla a tela inicial de credenciais e a área do aplicativo.
+   * Como: se não houver sessão válida, mostra apenas a tela de login; se houver sessão,
+   * libera cabeçalho, formulário, registros e administração.
+   * Quando: na inicialização, após login, logout e validação da sessão pelo Worker.
+   */
   function renderAuthState() {
+    const loginScreen = $('#loginScreen');
+    const appShell = $('#appShell');
+    const appTopbar = $('#appTopbar');
+    const appFooter = $('#appFooter');
     const status = $('#authStatus');
+    const sessionStatus = $('#sessionStatus');
     const apiLabel = $('#apiBaseLabel');
     if (apiLabel) apiLabel.textContent = API_BASE_URL;
     const state = authState || loadAuthState();
+    const isLogged = !!state?.user;
+
+    [appShell, appTopbar, appFooter].forEach(el => el?.classList.toggle('hidden', !isLogged));
+    loginScreen?.classList.toggle('hidden', isLogged);
 
     if (status) {
-      if (!state?.user) {
+      if (!isLogged) {
         status.className = 'validation-box warn';
-        status.textContent = 'Você ainda não está conectado. Faça login para finalizar a PET oficial, registrar a emissão no sistema e gerar PDF/comprovante técnico.';
+        status.textContent = 'Informe matrícula e senha para acessar o PET Digital.';
       } else {
         status.className = 'validation-box ok';
-        status.textContent = `Conectado como ${state.user.name} (${state.user.matricula}) — perfil: ${state.user.role}.`;
+        status.textContent = `Conectado como ${state.user.name} (${state.user.matricula}).`;
       }
     }
+
+    if (sessionStatus) {
+      if (!isLogged) {
+        sessionStatus.className = 'validation-box warn';
+        sessionStatus.textContent = 'Sessão não iniciada.';
+      } else {
+        sessionStatus.className = 'validation-box ok';
+        sessionStatus.textContent = `Usuário conectado: ${state.user.name} (${state.user.matricula}) — perfil: ${state.user.role}.`;
+      }
+    }
+
     updateFormAccessStatus();
   }
 
@@ -405,11 +430,11 @@
     }
     if (!state?.user) {
       box.className = 'validation-box warn';
-      box.textContent = 'Para emitir a PET oficial e gerar PDF/comprovante técnico, faça login. Sem login, use esta tela apenas como rascunho.';
+      box.textContent = 'Para emitir a PET oficial e gerar PDF/comprovante técnico, faça login na tela inicial.';
       return;
     }
     box.className = 'validation-box ok';
-    box.textContent = `Usuário conectado: ${state.user.name}. Antes da emissão oficial, confirme se este dispositivo está autorizado na aba Acesso.`;
+    box.textContent = `Usuário conectado: ${state.user.name}. Antes da emissão oficial, confirme se este dispositivo está autorizado na aba Sistema.`;
   }
 
   /**
@@ -466,7 +491,7 @@
     }
 
     updateFormAccessStatus('Este dispositivo ainda não foi autorizado para emissão oficial.', 'warn');
-    alert('Antes de gerar documento oficial, autorize este dispositivo na aba Acesso.');
+    alert('Antes de gerar documento oficial, autorize este dispositivo na aba Sistema.');
     showTab('systemTab');
     setTimeout(() => $('#registerDeviceBtn')?.focus(), 100);
     return false;
@@ -515,8 +540,9 @@
     saveAuthState({ token: data.token, user: data.user, loggedAt: new Date().toISOString() });
     $('#loginPassword').value = '';
     await refreshDevices(true);
-    updateFormAccessStatus('Login realizado. Agora confira se este dispositivo está autorizado.', 'ok');
-    alert('Login realizado. Confira a autorização deste dispositivo antes de finalizar PET oficial.');
+    showTab('formTab');
+    updateFormAccessStatus('Login realizado. Confira se este dispositivo está autorizado antes da emissão oficial.', 'ok');
+    alert('Login realizado. O formulário da PET foi liberado. Confira a autorização deste dispositivo antes de finalizar a PET oficial.');
   }
 
   /** Encerra a sessão local e tenta revogar no Worker. */
@@ -530,6 +556,8 @@
       box.className = 'validation-box warn';
       box.textContent = 'Entre no sistema para autorizar ou consultar este dispositivo.';
     }
+    showTab('formTab');
+    setTimeout(() => $('#loginMatricula')?.focus(), 100);
   }
 
   /** Consulta o usuário atual no Worker para confirmar se o token ainda vale. */
@@ -1090,6 +1118,7 @@
         <div class="auth-grid">
           <div class="photo-box">
             <strong>Foto do servidor</strong>
+            <p class="photo-note">A foto deve mostrar o rosto do servidor com o crachá funcional visível.</p>
             <div class="photo-preview">${person.photoDataUrl ? `<img src="${person.photoDataUrl}" alt="Foto de ${escapeAttr(person.nome || person.role)}" />` : '<span>Sem foto</span>'}</div>
             <label class="photo-input-label no-print">Capturar/selecionar foto
               <input class="person-photo-input" type="file" accept="image/*" capture="user" />
@@ -1344,7 +1373,7 @@
     // Eventos das abas auxiliares: histórico local, validador de JSON e gerenciamento da chave.
     $('#refreshRecords').addEventListener('click', renderRecords);
     $('#verifyFile').addEventListener('change', verifyFile);
-    $('#createKey').addEventListener('click', async () => { await createKeyPair(); await updateKeyStatus(); alert('Dispositivo preparado. Agora faça a autorização na aba Acesso, se ainda não tiver feito.'); });
+    $('#createKey').addEventListener('click', async () => { await createKeyPair(); await updateKeyStatus(); alert('Dispositivo preparado. Agora faça a autorização na aba Sistema, se ainda não tiver feito.'); });
     $('#exportPublicKey').addEventListener('click', exportPublicKey);
     $('#resetKey').addEventListener('click', () => {
       if (!confirm('Apagar a autorização local deste dispositivo? Registros já emitidos continuarão verificáveis pelo comprovante técnico, mas este aparelho precisará ser preparado e autorizado novamente.')) return;
@@ -1384,8 +1413,15 @@
    * dados específicos quando necessário, como registros ou status da chave.
    */
   function showTab(tabId) {
+    const state = authState || loadAuthState();
+    if (!state?.user) {
+      renderAuthState();
+      setTimeout(() => $('#loginMatricula')?.focus(), 100);
+      return;
+    }
     $$('.tab').forEach(t => t.classList.remove('active'));
-    $('#' + tabId).classList.add('active');
+    const target = $('#' + tabId) || $('#formTab');
+    target.classList.add('active');
     if (tabId === 'recordsTab') renderRecords();
     if (tabId === 'settingsTab') updateKeyStatus();
     if (tabId === 'systemTab') { renderAuthState(); refreshMe(); refreshDevices(true); }
@@ -1568,7 +1604,7 @@
     people.forEach(p => {
       if (!normalizeText(p.nome)) errors.push(`${p.role}: nome obrigatório.`);
       if (!normalizeText(p.matricula)) errors.push(`${p.role}: matrícula obrigatória.`);
-      if (!p.photoDataUrl) errors.push(`${p.role}: foto obrigatória para vincular a assinatura ao participante.`);
+      if (!p.photoDataUrl) errors.push(`${p.role}: foto obrigatória, com rosto do servidor e crachá funcional visível.`);
       if (!p.signatureDataUrl) errors.push(`${p.role}: assinatura obrigatória.`);
       if (p._dirtySignature) errors.push(`${p.role}: assinatura foi alterada no canvas, mas ainda não foi registrada. Clique em “Registrar assinatura”.`);
       if (p.signatureDataUrl && p.signatureMetrics && !p.signatureMetrics.isSigned) errors.push(`${p.role}: assinatura inválida ou vazia. Limpe e assine novamente.`);
@@ -2461,6 +2497,7 @@
     loadAuthState();
     renderAuthState();
     refreshMe();
+    if (!authToken()) setTimeout(() => $('#loginMatricula')?.focus(), 100);
     registerServiceWorker();
   }
 
