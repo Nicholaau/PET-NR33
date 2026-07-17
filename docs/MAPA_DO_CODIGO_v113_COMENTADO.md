@@ -1,4 +1,4 @@
-# Mapa do Código — PET-Digital NR-33 v1.1.2 comentado
+# Mapa do Código — PET-Digital NR-33 v1.1.3 comentado
 
 ## Frontend
 
@@ -10,9 +10,9 @@
 ## Worker
 
 - `worker/src/index.js`: API Cloudflare Worker.
-- `worker-pet-digital-api-v1.1.2.js`: cópia avulsa do mesmo código para colar direto no painel da Cloudflare.
+- `worker-pet-digital-api-v1.1.3.js`: cópia avulsa do mesmo código para colar direto no painel da Cloudflare.
 
-## Fluxo v1.1.2
+## Fluxo v1.1.3
 
 1. Usuário faz login.
 2. Dispositivo é preparado localmente.
@@ -26,3 +26,11 @@
 ## Mudança principal
 
 Sem login e sem dispositivo autorizado, o usuário pode preencher rascunho, mas não consegue finalizar a PET oficial nem gerar PDF/comprovante técnico.
+
+
+## Novidades v1.1.3
+- Administração de usuários: editar cadastro, redefinir senha e excluir acesso com preservação do histórico.
+- Hierarquia aplicada no Worker: gestor administra apenas operacional/verificador; admin administra todos.
+- Autorização de dispositivo consolidada em uma única tela e uma única ação do usuário.
+- Proteção contra cadastro duplicado e ações idempotentes de aprovação/revogação.
+- Troca obrigatória de senha temporária antes da emissão oficial.

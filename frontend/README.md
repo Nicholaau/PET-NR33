@@ -1,4 +1,4 @@
-# Frontend — PET-Digital NR-33 v1.1.2
+# Frontend — PET-Digital NR-33 v1.1.3
 
 Arquivos estáticos para publicar no Cloudflare Pages.
 

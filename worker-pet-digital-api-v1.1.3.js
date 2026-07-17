@@ -1,5 +1,5 @@
 /**
- * PET-Digital NR-33 v1.1.2 — Worker/API Cloudflare comentado.
+ * PET-Digital NR-33 v1.1.3 — Worker/API Cloudflare comentado.
  *
  * O que é este arquivo?
  * - É a API backend do PET-Digital. Ele roda no Cloudflare Worker.
@@ -98,10 +98,14 @@ async function route(request, env, url) {
   if (request.method === 'POST' && path === '/auth/login') return login(request, env);
   if (request.method === 'POST' && path === '/auth/logout') return logout(request, env);
   if (request.method === 'GET' && path === '/auth/me') return me(request, env);
+  if (request.method === 'POST' && path === '/auth/change-password') return changeOwnPassword(request, env);
 
   if (request.method === 'GET' && path === '/users') return listUsers(request, env);
   if (request.method === 'POST' && path === '/users') return createUser(request, env);
+  if (request.method === 'PATCH' && /^\/users\/[^/]+$/.test(path)) return updateUser(request, env, path.split('/')[2]);
   if (request.method === 'PATCH' && path.startsWith('/users/') && path.endsWith('/status')) return updateUserStatus(request, env, path.split('/')[2]);
+  if (request.method === 'POST' && path.startsWith('/users/') && path.endsWith('/reset-password')) return resetUserPassword(request, env, path.split('/')[2]);
+  if (request.method === 'DELETE' && /^\/users\/[^/]+$/.test(path)) return deleteUserAccess(request, env, path.split('/')[2]);
 
   if (request.method === 'POST' && path === '/devices/register') return registerDevice(request, env);
   if (request.method === 'GET' && path === '/devices') return listDevices(request, env);
@@ -198,22 +202,50 @@ async function me(request, env) {
   return json({ ok: true, user: publicUser(auth.user), session: { expires_at: auth.session.expires_at } });
 }
 
+
 /**
- * O quê: lista usuários cadastrados.
- * Como: exige perfil admin ou gestor e consulta campos públicos em `app_users`.
- * Quando: usado por administradores/gestores na manutenção do cadastro.
+ * O quê: permite que o próprio usuário altere a senha.
+ * Como: confirma a senha atual, gera novo PBKDF2, limpa a exigência de troca e revoga as demais sessões.
+ * Quando: primeiro acesso com senha temporária, redefinição administrativa ou troca voluntária.
  */
-async function listUsers(request, env) {
-  const auth = await requireRole(request, env, ['admin', 'gestor']);
-  const rows = await env.DB.prepare(`SELECT id, name, matricula, email, role, unit, status, created_at, last_login_at FROM app_users ORDER BY name`).all();
-  await audit(env, auth.user.id, 'users_list', 'app_users', null, 'success', request, {});
-  return json({ ok: true, users: rows.results });
+async function changeOwnPassword(request, env) {
+  const auth = await requireAuth(request, env);
+  const body = await readJson(request);
+  const currentPassword = String(body.currentPassword || '');
+  const newPassword = String(body.newPassword || '');
+  if (!currentPassword) throw httpError(400, 'Informe a senha atual.');
+  assertPassword(newPassword);
+  if (currentPassword === newPassword) throw httpError(400, 'A nova senha deve ser diferente da senha atual.');
+
+  const stored = await env.DB.prepare('SELECT * FROM app_users WHERE id = ?').bind(auth.user.id).first();
+  if (!stored || !(await verifyPassword(currentPassword, stored, env))) throw httpError(401, 'Senha atual incorreta.');
+
+  const password = await hashPassword(newPassword, env);
+  await env.DB.prepare(`UPDATE app_users SET password_hash = ?, password_salt = ?, password_alg = ?, must_change_password = 0, updated_at = ? WHERE id = ?`)
+    .bind(password.hash, password.salt, password.alg, nowIso(), auth.user.id).run();
+  await env.DB.prepare('UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND id <> ? AND revoked_at IS NULL')
+    .bind(nowIso(), auth.user.id, auth.session.id).run();
+  await audit(env, auth.user.id, 'password_change_own', 'app_users', auth.user.id, 'success', request, {});
+  const updated = await env.DB.prepare('SELECT * FROM app_users WHERE id = ?').bind(auth.user.id).first();
+  return json({ ok: true, user: publicUser(updated) });
 }
 
 /**
- * O quê: cadastra um usuário operacional, verificador, gestor ou admin.
- * Como: valida perfil permitido, calcula hash seguro da senha e grava usuário ativo no D1.
- * Quando: usado por admin/gestor para liberar pessoas a utilizar o PET-Digital.
+ * O quê: lista usuários cadastrados.
+ * Como: exige admin ou gestor e devolve dados públicos, incluindo a indicação de troca de senha.
+ * Quando: tela de administração de usuários.
+ */
+async function listUsers(request, env) {
+  const auth = await requireRole(request, env, ['admin', 'gestor']);
+  const rows = await env.DB.prepare(`SELECT id, name, matricula, email, role, unit, status, must_change_password, created_at, updated_at, last_login_at FROM app_users ORDER BY CASE role WHEN 'admin' THEN 1 WHEN 'gestor' THEN 2 WHEN 'verificador' THEN 3 ELSE 4 END, name`).all();
+  await audit(env, auth.user.id, 'users_list', 'app_users', null, 'success', request, {});
+  return json({ ok: true, users: rows.results.map(publicUser) });
+}
+
+/**
+ * O quê: cadastra um novo usuário.
+ * Como: admin pode escolher qualquer perfil; gestor somente operacional ou verificador.
+ * Quando: inclusão de servidor no PET-Digital.
  */
 async function createUser(request, env) {
   const auth = await requireRole(request, env, ['admin', 'gestor']);
@@ -222,7 +254,7 @@ async function createUser(request, env) {
   assertText(body.matricula, 'Matrícula obrigatória.');
   assertPassword(body.password);
   const role = clean(body.role || 'operacional');
-  if (!['admin', 'gestor', 'verificador', 'operacional'].includes(role)) throw httpError(400, 'Perfil inválido.');
+  assertRoleAllowedForActor(auth.user, role);
 
   const password = await hashPassword(body.password, env);
   const id = crypto.randomUUID();
@@ -231,31 +263,117 @@ async function createUser(request, env) {
       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, 1, ?)`)
       .bind(id, clean(body.name), clean(body.matricula), clean(body.email || null), role, clean(body.unit || null), password.hash, password.salt, password.alg, nowIso()).run();
   } catch (e) {
-    throw httpError(409, 'Não foi possível cadastrar usuário. Verifique se a matrícula/e-mail já existem e se o schema do D1 aceita os perfis v1.1.2.');
+    throw httpError(409, 'Não foi possível cadastrar. Verifique se matrícula ou e-mail já estão em uso.');
   }
   await audit(env, auth.user.id, 'user_create', 'app_users', id, 'success', request, { role, matricula: clean(body.matricula) });
-  return json({ ok: true, user: publicUser({ id, name: clean(body.name), matricula: clean(body.matricula), email: clean(body.email || null), role, unit: clean(body.unit || null), status: 'active' }) }, 201);
+  const created = await env.DB.prepare('SELECT * FROM app_users WHERE id = ?').bind(id).first();
+  return json({ ok: true, user: publicUser(created) }, 201);
 }
 
 /**
- * O quê: altera o status de um usuário.
- * Como: aceita pending/active/suspended/disabled e atualiza `app_users`.
- * Quando: usado para suspender, reativar ou desabilitar acesso sem apagar histórico.
+ * O quê: atualiza nome, matrícula, e-mail, unidade, perfil e situação do usuário.
+ * Como: aplica hierarquia: gestor só gerencia operacional/verificador; admin gerencia todos.
+ * Quando: correção cadastral, mudança de perfil ou suspensão/reativação.
+ */
+async function updateUser(request, env, userId) {
+  const auth = await requireRole(request, env, ['admin', 'gestor']);
+  const target = await getUserOr404(env, userId);
+  assertCanManageTarget(auth.user, target);
+  const body = await readJson(request);
+
+  const name = clean(body.name ?? target.name);
+  const matricula = clean(body.matricula ?? target.matricula);
+  const email = body.email !== undefined ? (clean(body.email) || null) : (target.email || null);
+  const unit = body.unit !== undefined ? (clean(body.unit) || null) : (target.unit || null);
+  const role = clean(body.role ?? target.role);
+  const status = clean(body.status ?? target.status);
+  assertText(name, 'Nome obrigatório.');
+  assertText(matricula, 'Matrícula obrigatória.');
+  assertRoleAllowedForActor(auth.user, role);
+  if (!['pending', 'active', 'suspended', 'disabled'].includes(status)) throw httpError(400, 'Situação inválida.');
+
+  if (target.role === 'admin' && (role !== 'admin' || status !== 'active')) await ensureAnotherActiveAdmin(env, target.id);
+  if (target.id === auth.user.id && status !== 'active') throw httpError(400, 'Não é permitido desativar a própria conta durante a sessão.');
+
+  try {
+    await env.DB.prepare(`UPDATE app_users SET name = ?, matricula = ?, email = ?, role = ?, unit = ?, status = ?, updated_at = ? WHERE id = ?`)
+      .bind(name, matricula, email, role, unit, status, nowIso(), userId).run();
+  } catch (e) {
+    throw httpError(409, 'Não foi possível atualizar. Verifique se matrícula ou e-mail já estão em uso.');
+  }
+  if (status !== 'active') await revokeUserSessions(env, userId);
+  await audit(env, auth.user.id, 'user_update', 'app_users', userId, 'success', request, { role, status, matricula });
+  const updated = await getUserOr404(env, userId);
+  return json({ ok: true, user: publicUser(updated) });
+}
+
+/**
+ * O quê: mantém compatibilidade com a rota antiga de alteração de situação.
+ * Como: delega à mesma hierarquia e proteções da edição completa.
+ * Quando: clientes anteriores que ainda chamam `/users/:id/status`.
  */
 async function updateUserStatus(request, env, userId) {
   const auth = await requireRole(request, env, ['admin', 'gestor']);
+  const target = await getUserOr404(env, userId);
+  assertCanManageTarget(auth.user, target);
   const body = await readJson(request);
   const status = clean(body.status);
-  if (!['pending', 'active', 'suspended', 'disabled'].includes(status)) throw httpError(400, 'Status inválido.');
+  if (!['pending', 'active', 'suspended', 'disabled'].includes(status)) throw httpError(400, 'Situação inválida.');
+  if (target.role === 'admin' && status !== 'active') await ensureAnotherActiveAdmin(env, target.id);
+  if (target.id === auth.user.id && status !== 'active') throw httpError(400, 'Não é permitido desativar a própria conta durante a sessão.');
   await env.DB.prepare('UPDATE app_users SET status = ?, updated_at = ? WHERE id = ?').bind(status, nowIso(), userId).run();
+  if (status !== 'active') await revokeUserSessions(env, userId);
   await audit(env, auth.user.id, 'user_status_update', 'app_users', userId, 'success', request, { status });
   return json({ ok: true });
 }
 
 /**
- * O quê: registra a chave pública de um dispositivo do usuário.
- * Como: recalcula o hash canônico da chave pública JWK e grava no D1 como pending ou active.
- * Quando: chamado após login, quando o usuário vincula celular/computador à conta.
+ * O quê: redefine a senha de outro usuário para uma senha temporária.
+ * Como: respeita a hierarquia, grava novo hash, exige troca no próximo acesso e encerra sessões antigas.
+ * Quando: senha esquecida ou recuperação administrativa.
+ */
+async function resetUserPassword(request, env, userId) {
+  const auth = await requireRole(request, env, ['admin', 'gestor']);
+  const target = await getUserOr404(env, userId);
+  assertCanManageTarget(auth.user, target);
+  if (target.id === auth.user.id) throw httpError(400, 'Para alterar a própria senha, use a opção “Alterar minha senha”.');
+  const body = await readJson(request);
+  const temporaryPassword = String(body.temporaryPassword || '');
+  assertPassword(temporaryPassword);
+  const password = await hashPassword(temporaryPassword, env);
+  await env.DB.prepare(`UPDATE app_users SET password_hash = ?, password_salt = ?, password_alg = ?, must_change_password = 1, updated_at = ? WHERE id = ?`)
+    .bind(password.hash, password.salt, password.alg, nowIso(), userId).run();
+  await revokeUserSessions(env, userId);
+  await audit(env, auth.user.id, 'user_password_reset', 'app_users', userId, 'success', request, {});
+  return json({ ok: true, message: 'Senha temporária definida. O usuário deverá alterá-la no próximo acesso.' });
+}
+
+/**
+ * O quê: exclui o acesso de um usuário sem apagar o histórico probatório.
+ * Como: aplica exclusão lógica (`disabled`), encerra sessões e revoga dispositivos ativos.
+ * Quando: desligamento, cadastro indevido ou retirada definitiva de acesso.
+ */
+async function deleteUserAccess(request, env, userId) {
+  const auth = await requireRole(request, env, ['admin', 'gestor']);
+  const target = await getUserOr404(env, userId);
+  assertCanManageTarget(auth.user, target);
+  if (target.id === auth.user.id) throw httpError(400, 'Não é permitido excluir o próprio acesso.');
+  if (target.role === 'admin') await ensureAnotherActiveAdmin(env, target.id);
+
+  const timestamp = nowIso();
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE app_users SET status = 'disabled', updated_at = ? WHERE id = ?`).bind(timestamp, userId),
+    env.DB.prepare(`UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE user_id = ?`).bind(timestamp, userId),
+    env.DB.prepare(`UPDATE device_keys SET status = 'revoked', revoked_by = ?, revoked_at = ?, revoke_reason = 'Acesso do usuário excluído' WHERE user_id = ? AND status <> 'revoked'`).bind(auth.user.id, timestamp, userId)
+  ]);
+  await audit(env, auth.user.id, 'user_delete_access', 'app_users', userId, 'success', request, { previousRole: target.role });
+  return json({ ok: true, message: 'Acesso excluído. O histórico foi preservado.' });
+}
+
+/**
+ * O quê: configura e solicita autorização do dispositivo atual em uma única operação.
+ * Como: valida a chave pública; cria registro pending para operacional/verificador e active para gestor/admin.
+ * Quando: clique em “Configurar e solicitar autorização”. A criação da chave local é automática no frontend.
  */
 async function registerDevice(request, env) {
   const auth = await requireAuth(request, env);
@@ -263,12 +381,18 @@ async function registerDevice(request, env) {
   assertText(body.deviceLabel, 'Nome do dispositivo obrigatório.');
   if (!body.publicKeyJwk || typeof body.publicKeyJwk !== 'object') throw httpError(400, 'Chave pública inválida.');
   const publicKeyHash = clean(body.publicKeyHash).toLowerCase();
-  if (!HASH_RE.test(publicKeyHash)) throw httpError(400, 'Hash da chave pública inválido.');
+  if (!HASH_RE.test(publicKeyHash)) throw httpError(400, 'Código do dispositivo inválido.');
   const recalculated = await sha256HexCanonical(body.publicKeyJwk);
-  if (recalculated !== publicKeyHash) throw httpError(400, 'Hash da chave pública não confere.');
+  if (recalculated !== publicKeyHash) throw httpError(400, 'Código do dispositivo não confere.');
 
   const existing = await env.DB.prepare('SELECT * FROM device_keys WHERE public_key_hash = ?').bind(publicKeyHash).first();
-  if (existing) return json({ ok: true, device: existing, alreadyExists: true });
+  if (existing) {
+    if (existing.user_id !== auth.user.id) throw httpError(409, 'Este dispositivo já está vinculado a outro usuário. Um gestor/admin deve revogar o vínculo anterior.');
+    await env.DB.prepare('UPDATE device_keys SET device_label = ? WHERE id = ?').bind(clean(body.deviceLabel), existing.id).run();
+    const refreshed = await env.DB.prepare('SELECT * FROM device_keys WHERE id = ?').bind(existing.id).first();
+    if (['revoked', 'lost'].includes(refreshed.status)) throw httpError(409, 'Este dispositivo já foi revogado. Solicite a reativação a um gestor/admin; não é necessário cadastrá-lo novamente.');
+    return json({ ok: true, device: refreshed, alreadyExists: true, message: refreshed.status === 'active' ? 'Dispositivo já autorizado.' : 'Solicitação já enviada e aguardando aprovação.' });
+  }
 
   const status = ['admin', 'gestor'].includes(auth.user.role) ? 'active' : 'pending';
   const id = crypto.randomUUID();
@@ -277,47 +401,54 @@ async function registerDevice(request, env) {
     .bind(id, auth.user.id, clean(body.deviceLabel), JSON.stringify(body.publicKeyJwk), publicKeyHash, clean(body.algorithm || 'ECDSA-P256-SHA256'), status, nowIso(), status === 'active' ? auth.user.id : null, status === 'active' ? nowIso() : null).run();
   await audit(env, auth.user.id, 'device_register', 'device_keys', id, 'success', request, { status, publicKeyHash });
   const device = await env.DB.prepare('SELECT * FROM device_keys WHERE id = ?').bind(id).first();
-  return json({ ok: true, device }, 201);
+  return json({ ok: true, device, message: status === 'active' ? 'Dispositivo configurado e autorizado.' : 'Dispositivo configurado. A solicitação foi enviada para aprovação.' }, 201);
 }
 
 /**
- * O quê: lista dispositivos/chaves públicas.
- * Como: operacional vê só os próprios; verificador/gestor/admin veem todos.
- * Quando: usado para acompanhar chaves pendentes, ativas, revogadas ou perdidas.
+ * O quê: lista dispositivos.
+ * Como: admin/gestor veem a equipe; operacional/verificador veem somente os próprios.
+ * Quando: atualização do status do aparelho ou gestão das autorizações pendentes.
  */
 async function listDevices(request, env) {
   const auth = await requireAuth(request, env);
-  const canSeeAll = ['admin', 'gestor', 'verificador'].includes(auth.user.role);
-  const sql = `SELECT dk.id, dk.user_id, u.name AS user_name, u.matricula AS user_matricula, dk.device_label, dk.public_key_hash, dk.algorithm, dk.status, dk.created_at, dk.approved_at, dk.revoked_at, dk.last_used_at
-    FROM device_keys dk LEFT JOIN app_users u ON u.id = dk.user_id ${canSeeAll ? '' : 'WHERE dk.user_id = ?'} ORDER BY dk.created_at DESC`;
+  const canSeeAll = ['admin', 'gestor'].includes(auth.user.role);
+  const sql = `SELECT dk.id, dk.user_id, u.name AS user_name, u.matricula AS user_matricula, u.status AS user_status, dk.device_label, dk.public_key_hash, dk.algorithm, dk.status, dk.created_at, dk.approved_at, dk.revoked_at, dk.last_used_at
+    FROM device_keys dk LEFT JOIN app_users u ON u.id = dk.user_id ${canSeeAll ? '' : 'WHERE dk.user_id = ?'} ORDER BY CASE dk.status WHEN 'pending' THEN 1 WHEN 'active' THEN 2 ELSE 3 END, dk.created_at DESC`;
   const stmt = env.DB.prepare(sql);
   const rows = canSeeAll ? await stmt.all() : await stmt.bind(auth.user.id).all();
   return json({ ok: true, devices: rows.results });
 }
 
 /**
- * O quê: aprova uma chave pública pendente.
- * Como: exige admin/gestor e marca o dispositivo como active.
- * Quando: depois que o gestor confirma que o dispositivo pertence ao usuário correto.
+ * O quê: aprova ou reativa um dispositivo.
+ * Como: admin/gestor clicam uma única vez; o status passa imediatamente para active.
+ * Quando: solicitação pendente ou reativação deliberada de aparelho revogado.
  */
 async function approveDevice(request, env, deviceId) {
   const auth = await requireRole(request, env, ['admin', 'gestor']);
-  await env.DB.prepare(`UPDATE device_keys SET status = 'active', approved_by = ?, approved_at = ? WHERE id = ?`).bind(auth.user.id, nowIso(), deviceId).run();
-  await audit(env, auth.user.id, 'device_approve', 'device_keys', deviceId, 'success', request, {});
-  return json({ ok: true });
+  const device = await env.DB.prepare(`SELECT dk.*, u.status AS user_status FROM device_keys dk JOIN app_users u ON u.id = dk.user_id WHERE dk.id = ?`).bind(deviceId).first();
+  if (!device) throw httpError(404, 'Dispositivo não encontrado.');
+  if (device.user_status !== 'active') throw httpError(400, 'O usuário deste dispositivo não está ativo.');
+  if (device.status === 'active') return json({ ok: true, alreadyActive: true, message: 'O dispositivo já estava autorizado.' });
+  await env.DB.prepare(`UPDATE device_keys SET status = 'active', approved_by = ?, approved_at = ?, revoked_by = NULL, revoked_at = NULL, revoke_reason = NULL WHERE id = ?`).bind(auth.user.id, nowIso(), deviceId).run();
+  await audit(env, auth.user.id, 'device_approve', 'device_keys', deviceId, 'success', request, { previousStatus: device.status });
+  return json({ ok: true, message: 'Dispositivo autorizado. Não há outra etapa necessária.' });
 }
 
 /**
- * O quê: revoga uma chave/dispositivo.
- * Como: exige admin/gestor, marca como revoked e grava motivo/data/autor.
- * Quando: perda de celular, troca de aparelho, suspeita de comprometimento ou desligamento.
+ * O quê: revoga ou rejeita um dispositivo.
+ * Como: admin/gestor marcam como revoked e registram motivo, data e responsável.
+ * Quando: perda/troca de aparelho, solicitação indevida ou encerramento de acesso.
  */
 async function revokeDevice(request, env, deviceId) {
   const auth = await requireRole(request, env, ['admin', 'gestor']);
   const body = await readJson(request).catch(() => ({}));
-  await env.DB.prepare(`UPDATE device_keys SET status = 'revoked', revoked_by = ?, revoked_at = ?, revoke_reason = ? WHERE id = ?`).bind(auth.user.id, nowIso(), clean(body.reason || 'Revogação manual'), deviceId).run();
-  await audit(env, auth.user.id, 'device_revoke', 'device_keys', deviceId, 'success', request, {});
-  return json({ ok: true });
+  const device = await env.DB.prepare('SELECT * FROM device_keys WHERE id = ?').bind(deviceId).first();
+  if (!device) throw httpError(404, 'Dispositivo não encontrado.');
+  if (device.status === 'revoked') return json({ ok: true, alreadyRevoked: true, message: 'O dispositivo já estava revogado.' });
+  await env.DB.prepare(`UPDATE device_keys SET status = 'revoked', revoked_by = ?, revoked_at = ?, revoke_reason = ? WHERE id = ?`).bind(auth.user.id, nowIso(), clean(body.reason || (device.status === 'pending' ? 'Solicitação rejeitada' : 'Revogação manual')), deviceId).run();
+  await audit(env, auth.user.id, 'device_revoke', 'device_keys', deviceId, 'success', request, { previousStatus: device.status });
+  return json({ ok: true, message: device.status === 'pending' ? 'Solicitação rejeitada.' : 'Dispositivo revogado.' });
 }
 
 /**
@@ -327,6 +458,7 @@ async function revokeDevice(request, env, deviceId) {
  */
 async function createPetRecord(request, env) {
   const auth = await requireAuth(request, env);
+  if (auth.user.mustChangePassword) throw httpError(403, 'Altere a senha temporária antes de registrar uma PET oficial.');
   const body = await readJson(request);
   const payloadHash = clean(body.payloadHash).toLowerCase();
   if (!HASH_RE.test(payloadHash)) throw httpError(400, 'Hash do payload inválido.');
@@ -444,7 +576,7 @@ async function requireAuth(request, env) {
   if (!match) throw httpError(401, 'Sessão ausente. Faça login.');
   const token = match[1].trim();
   const sessionHash = await sha256Hex(`session:${token}:${env.SESSION_SECRET}`);
-  const row = await env.DB.prepare(`SELECT s.*, u.id AS u_id, u.name, u.matricula, u.email, u.role, u.unit, u.status AS user_status
+  const row = await env.DB.prepare(`SELECT s.*, u.id AS u_id, u.name, u.matricula, u.email, u.role, u.unit, u.status AS user_status, u.must_change_password
     FROM auth_sessions s JOIN app_users u ON u.id = s.user_id
     WHERE s.session_hash = ? AND s.revoked_at IS NULL`).bind(sessionHash).first();
   if (!row) throw httpError(401, 'Sessão inválida.');
@@ -452,7 +584,7 @@ async function requireAuth(request, env) {
   if (row.user_status !== 'active') throw httpError(403, 'Usuário não está ativo.');
   return {
     session: { id: row.id, expires_at: row.expires_at },
-    user: { id: row.u_id, name: row.name, matricula: row.matricula, email: row.email, role: row.role, unit: row.unit, status: row.user_status }
+    user: { id: row.u_id, name: row.name, matricula: row.matricula, email: row.email, role: row.role, unit: row.unit, status: row.user_status, mustChangePassword: Boolean(Number(row.must_change_password || 0)) }
   };
 }
 
@@ -465,6 +597,38 @@ async function requireRole(request, env, roles) {
   const auth = await requireAuth(request, env);
   if (!roles.includes(auth.user.role)) throw httpError(403, 'Perfil sem permissão para esta operação.');
   return auth;
+}
+
+/** O quê: busca usuário por ID; Como: consulta D1 e retorna 404 se não existir; Quando: edição/reset/exclusão. */
+async function getUserOr404(env, userId) {
+  const user = await env.DB.prepare('SELECT * FROM app_users WHERE id = ?').bind(userId).first();
+  if (!user) throw httpError(404, 'Usuário não encontrado.');
+  return user;
+}
+
+/** O quê: aplica hierarquia de administração; Como: gestor só alcança operacional/verificador; Quando: qualquer ação sobre outro usuário. */
+function assertCanManageTarget(actor, target) {
+  if (actor.role === 'admin') return;
+  if (actor.role === 'gestor' && ['operacional', 'verificador'].includes(target.role)) return;
+  throw httpError(403, 'Gestor pode administrar somente usuários operacionais e verificadores. Usuários gestor/admin exigem um administrador.');
+}
+
+/** O quê: valida perfil que o ator pode atribuir; Como: admin todos, gestor somente níveis inferiores; Quando: cadastro e edição. */
+function assertRoleAllowedForActor(actor, role) {
+  const all = ['admin', 'gestor', 'verificador', 'operacional'];
+  if (!all.includes(role)) throw httpError(400, 'Perfil inválido.');
+  if (actor.role === 'gestor' && !['verificador', 'operacional'].includes(role)) throw httpError(403, 'Gestor só pode atribuir os perfis operacional ou verificador.');
+}
+
+/** O quê: impede que o sistema fique sem administrador ativo; Como: conta outros admins ativos; Quando: remoção, suspensão ou rebaixamento de admin. */
+async function ensureAnotherActiveAdmin(env, excludedUserId) {
+  const row = await env.DB.prepare(`SELECT COUNT(*) AS count FROM app_users WHERE role = 'admin' AND status = 'active' AND id <> ?`).bind(excludedUserId).first();
+  if (Number(row?.count || 0) < 1) throw httpError(400, 'A operação deixaria o sistema sem outro administrador ativo.');
+}
+
+/** O quê: encerra todas as sessões de um usuário; Como: marca revoked_at; Quando: reset de senha, suspensão ou exclusão. */
+async function revokeUserSessions(env, userId) {
+  await env.DB.prepare('UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE user_id = ?').bind(nowIso(), userId).run();
 }
 
 /**
@@ -552,7 +716,7 @@ function buildCorsHeaders(request, env) {
   const allowOrigin = allowed === '*' ? '*' : (origin && origin.replace(/\/$/, '') === allowed ? origin : allowed || '*');
   return {
     'Access-Control-Allow-Origin': allowOrigin,
-    'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin',
@@ -610,7 +774,7 @@ function assertPassword(value) { if (String(value || '').length < 8) throw httpE
 /** O quê: valida hash opcional; Como: aceita vazio como null e exige SHA-256 hex quando preenchido; Quando: registro de PET e arquivos. */
 function nullableHash(value) { const v = clean(value); if (!v) return null; if (!HASH_RE.test(v)) throw httpError(400, 'Hash inválido.'); return v.toLowerCase(); }
 /** O quê: remove campos sensíveis do usuário; Como: devolve só dados públicos; Quando: respostas de login/cadastro/me. */
-function publicUser(u) { return { id: u.id, name: u.name, matricula: u.matricula, email: u.email || null, role: u.role, unit: u.unit || null, status: u.status || u.user_status || null }; }
+function publicUser(u) { return { id: u.id, name: u.name, matricula: u.matricula, email: u.email || null, role: u.role, unit: u.unit || null, status: u.status || u.user_status || null, mustChangePassword: u.mustChangePassword ?? Boolean(Number(u.must_change_password || 0)), createdAt: u.created_at || null, updatedAt: u.updated_at || null, lastLoginAt: u.last_login_at || null }; }
 /** O quê: identifica IP do cliente; Como: lê CF-Connecting-IP ou x-forwarded-for; Quando: auditoria e registro de PET. */
 function clientIp(request) { return request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || ''; }
 

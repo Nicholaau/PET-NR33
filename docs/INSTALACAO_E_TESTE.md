@@ -1,4 +1,4 @@
-# Instalação e teste — PET-Digital v1.1.2
+# Instalação e teste — PET-Digital v1.1.3
 
 ## 1. Worker/API
 
@@ -11,7 +11,7 @@ worker/src/index.js
 ou copie o arquivo avulso:
 
 ```text
-worker-pet-digital-api-v1.1.2.js
+worker-pet-digital-api-v1.1.3.js
 ```
 
 Faça o deploy.
@@ -39,7 +39,7 @@ https://pet-digital.pages.dev
 
 ## 3. Banco D1
 
-Não há migration obrigatória nova da v1.1.0 para a v1.1.2.
+Não há migration obrigatória nova da v1.1.0 para a v1.1.3.
 
 Confirme apenas que as tabelas existem:
 
@@ -51,15 +51,15 @@ SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;
 
 1. Criar primeiro admin, se ainda não existir.
 2. Fazer login.
-3. Autorizar o dispositivo.
-4. Cadastrar usuário operacional, se necessário.
-5. Preencher uma PET fictícia.
-6. Tentar finalizar sem dispositivo aprovado para confirmar o bloqueio.
-7. Aprovar o dispositivo.
-8. Finalizar PET oficial.
-9. Gerar PDF oficial.
-10. Salvar/compartilhar o comprovante técnico.
+3. Clicar em “Configurar e solicitar autorização” uma única vez.
+4. Testar cadastro de usuário operacional/verificador.
+5. Testar edição cadastral e redefinição de senha.
+6. Confirmar que gestor não consegue editar gestor/admin.
+7. Aprovar o dispositivo pendente e confirmar que a autorização é imediata.
+8. Preencher uma PET fictícia.
+9. Finalizar PET oficial e gerar PDF/comprovante.
+10. Testar “Excluir acesso” em usuário fictício e confirmar preservação do histórico.
 
 ## 5. Observação
 
-A v1.1.2 não guarda PDF, comprovante técnico, fotos ou assinaturas desenhadas no banco. O sistema registra apenas metadados, códigos técnicos e auditoria mínima.
+A v1.1.3 não guarda PDF, comprovante técnico, fotos ou assinaturas desenhadas no banco. O sistema registra apenas metadados, códigos técnicos e auditoria mínima.

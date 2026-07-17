@@ -1,4 +1,4 @@
-# PET-Digital NR-33 v1.1.2
+# PET-Digital NR-33 v1.1.3
 
 Versão com fluxo mais próximo de produção para uso com **Cloudflare Pages + Cloudflare Worker + D1**.
 
@@ -7,18 +7,19 @@ Versão com fluxo mais próximo de produção para uso com **Cloudflare Pages + 
 - Worker/API: `https://pet-digital-api.nicholas-dmae.workers.dev`
 - Pages/frontend: `https://pet-digital.pages.dev`
 
-## O que muda na v1.1.2
+## O que muda na v1.1.3
 
-- O app agora abre em uma **tela inicial de login** antes de mostrar o formulário da PET.
-- A PET oficial agora exige **login** antes da finalização.
-- A geração do **PDF oficial** e do **comprovante técnico** fica bloqueada sem usuário conectado e dispositivo autorizado.
-- A interface foi simplificada para o usuário final, evitando termos técnicos na tela principal.
-- Termos técnicos foram recolhidos em áreas de “Detalhes técnicos”.
-- O botão “Registrar hash no D1” foi trocado por “Registrar no sistema”.
-- O “JSON” passou a ser apresentado como **comprovante técnico**.
-- O Worker foi ajustado para `PBKDF2` com **100.000 iterações**, compatível com o limite do Cloudflare Workers.
-- Inclui observação de que a foto deve mostrar **rosto do servidor com crachá funcional visível**.
-- Mantém comentários no padrão **O quê / Como / Quando**.
+- Administração de usuários com **editar cadastro**, **redefinir senha** e **excluir acesso**.
+- Gestor administra somente usuários **operacional** e **verificador**.
+- Admin administra todos os perfis, inclusive outros gestores e administradores.
+- Exclusão de acesso é lógica: preserva histórico, encerra sessões e revoga dispositivos.
+- Usuário novo ou com senha redefinida deve trocar a senha temporária antes de emitir PET oficial.
+- Autorização do aparelho foi consolidada em uma única tela e em um único botão.
+- O botão prepara a proteção local e envia a solicitação automaticamente.
+- Para operacional/verificador, basta uma aprovação do gestor/admin; não há segunda etapa para o usuário.
+- Proteções contra cadastro duplicado de dispositivo e contra apagar a chave local enquanto houver autorização ativa.
+- Mantém login obrigatório, PDF/comprovante vinculados ao dispositivo autorizado e foto com rosto + crachá visível.
+- Código comentado no padrão **O quê / Como / Quando**.
 
 ## Fluxo de uso recomendado
 
@@ -36,7 +37,7 @@ Versão com fluxo mais próximo de produção para uso com **Cloudflare Pages + 
 ## Publicação
 
 - Publique a pasta `frontend/` no Cloudflare Pages.
-- No Worker `pet-digital-api`, substitua o código atual por `worker/src/index.js` ou pelo arquivo avulso `worker-pet-digital-api-v1.1.2.js`.
+- No Worker `pet-digital-api`, substitua o código atual por `worker/src/index.js` ou pelo arquivo avulso `worker-pet-digital-api-v1.1.3.js`.
 - Confirme se o binding do D1 continua como `DB`.
 
 ## Aviso operacional
