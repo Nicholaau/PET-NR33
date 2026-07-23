@@ -2,15 +2,15 @@
   'use strict';
 
   /**
-   * PET Digital NR-33 v1.1.3 — frontend comentado.
+   * PET Digital NR-33 v1.1.4 — frontend comentado.
    *
    * Visão geral do arquivo:
-   * - Este app é um PWA estático: não depende de servidor próprio para preencher, assinar,
-   *   validar, imprimir e exportar a PET.
-   * - O estado temporário fica em memória (`people` e `finalizedRecord`) e o rascunho/
-   *   registros finalizados são persistidos no `localStorage` do dispositivo.
-   * - O fluxo principal é: preencher formulário -> validar -> finalizar/assinar hash ->
-   *   gerar prova de PDF -> imprimir/salvar PDF -> exportar comprovante técnico.
+   * - A interface é um PWA estático no Cloudflare Pages, mas a emissão oficial depende
+   *   do Worker/D1 para autenticação, autorização do dispositivo e registro dos hashes.
+   * - O estado temporário fica em memória; rascunhos e registros são separados por usuário
+   *   no localStorage, enquanto PDF/JSON temporários ficam no IndexedDB do dispositivo.
+   * - O fluxo principal é: login -> preencher -> validar -> gerar os arquivos finais ->
+   *   recalcular os hashes reais -> registrar no Worker -> compartilhar PDF + comprovante.
    * - Foto, assinatura desenhada, dados do formulário e prova de geração do PDF entram
    *   no material que é hasheado e assinado criptograficamente.
    *
@@ -19,12 +19,13 @@
    */
 
   // Versão funcional gravada no dossiê e exibida nos elementos de prova.
-  const APP_VERSION = '1.1.3';
+  const APP_VERSION = '1.1.4';
 
   // Perfil técnico aceito pelo próprio validador. Esses valores padronizam como o hash
   // é calculado, qual algoritmo assina o registro e como outro validador deve conferir.
-  const VALIDATION_PROFILE = 'PET-DIGITAL-NR33-PROOF/v1';
-  const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.1.3';
+  const VALIDATION_PROFILE = 'PET-DIGITAL-NR33-v1';
+  const ACCEPTED_VALIDATION_PROFILES = new Set(['PET-DIGITAL-NR33-v1', 'PET-DIGITAL-NR33-PROOF/v1']);
+  const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.1.4';
   const RECORD_TYPE = 'PET-DIGITAL-DOSSIE/v1';
   const HASH_ALGORITHM = 'SHA-256';
   const SIGNATURE_ALGORITHM = 'ECDSA-P256-SHA256';
@@ -44,15 +45,22 @@
   };
 
   // Chaves usadas no localStorage para separar rascunhos, registros finalizados e chave criptográfica.
-  const STORAGE_DRAFT = 'petDigitalDraftV7';
-  const STORAGE_RECORDS = 'petDigitalRecordsV1';
+  const STORAGE_DRAFT = 'petDigitalDraftV8';
+  const STORAGE_RECORDS = 'petDigitalRecordsV2';
   const STORAGE_KEYPAIR = 'petDigitalKeyPairV2';
   const STORAGE_AUTH = 'petDigitalAuthV1';
   const API_BASE_URL = 'https://pet-digital-api.nicholas-dmae.workers.dev';
   const FRONTEND_ORIGIN = 'https://pet-digital.pages.dev';
   const KEY_DB_NAME = 'petDigitalCryptoDbV2';
   const KEY_DB_STORE = 'signingKeys';
-  const KEY_DB_ID = 'main';
+  const KEY_DB_PREFIX = 'user:';
+  const LEGACY_KEY_DB_ID = 'main';
+  const OUTPUT_DB_NAME = 'petDigitalOutputsV1';
+  const OUTPUT_DB_STORE = 'officialFiles';
+
+  // Política de N/A: itens críticos nunca aceitam N/A; demais exigem justificativa.
+  const MAX_NA_ITEMS = 5;
+  const NA_FORBIDDEN_ITEMS = new Set(['01','02','03','05','06','08','10','11','12','14','16','17','18','22']);
 
   // Itens do checklist extraídos do modelo da PET. A tabela é renderizada dinamicamente a partir desta lista.
   const checklistItems = [
@@ -92,6 +100,7 @@
 
   // Última PET finalizada na sessão atual. É usada para habilitar PDF e exportação JSON.
   let finalizedRecord = null;
+  let finalizationInProgress = false;
 
   // Sessão autenticada no Worker/D1. O token é usado apenas para chamadas da API.
   let authState = null;
@@ -182,6 +191,132 @@
     return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
+  /** Calcula SHA-256 dos bytes exatos de um Blob/File. */
+  async function sha256BlobHex(blob) {
+    const bytes = await blob.arrayBuffer();
+    const hash = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  /** Converte Blob/File em Base64 puro para validação transitória no Worker. */
+  async function blobToBase64(blob) {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    return btoa(binary);
+  }
+
+  /** Retorna o usuário ativo; evita misturar dados locais de contas diferentes. */
+  function currentUser() { return (authState || loadAuthState())?.user || null; }
+
+  /** Monta uma chave de armazenamento exclusiva por usuário. */
+  function scopedStorageKey(base) {
+    const user = currentUser();
+    return user?.id ? `${base}:${user.id}` : null;
+  }
+
+  function currentDraftKey() { return scopedStorageKey(STORAGE_DRAFT); }
+  function currentRecordsKey() { return scopedStorageKey(STORAGE_RECORDS); }
+  function outputStorageId(recordId) {
+    const user = currentUser();
+    if (!user?.id || !recordId) return null;
+    return `${user.id}:${recordId}`;
+  }
+
+  /** Abre o IndexedDB que guarda temporariamente os arquivos oficiais por usuário. */
+  function openOutputDatabase() {
+    return new Promise((resolve, reject) => {
+      if (!window.indexedDB) return reject(new Error('IndexedDB não disponível neste navegador.'));
+      const request = indexedDB.open(OUTPUT_DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(OUTPUT_DB_STORE)) db.createObjectStore(OUTPUT_DB_STORE, { keyPath: 'id' });
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error('Falha ao abrir armazenamento dos documentos.'));
+    });
+  }
+
+  async function withOutputStore(mode, callback) {
+    const db = await openOutputDatabase();
+    try {
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(OUTPUT_DB_STORE, mode);
+        const store = tx.objectStore(OUTPUT_DB_STORE);
+        const result = callback(store);
+        if (result && typeof result.onsuccess !== 'undefined') {
+          result.onsuccess = () => resolve(result.result);
+          result.onerror = () => reject(result.error || new Error('Operação de documentos falhou.'));
+        } else {
+          tx.oncomplete = () => resolve(result);
+          tx.onerror = () => reject(tx.error || new Error('Transação de documentos falhou.'));
+        }
+      });
+    } finally { db.close(); }
+  }
+
+  async function saveOfficialFiles(record, pdfFile, jsonText) {
+    const id = outputStorageId(record.recordId);
+    if (!id) throw new Error('Usuário ou registro não identificado para salvar os documentos.');
+    await withOutputStore('readwrite', store => store.put({
+      id,
+      userId: currentUser().id,
+      recordId: record.recordId,
+      pdfFile,
+      jsonText,
+      pdfFilename: pdfFile.name,
+      jsonFilename: jsonFilename(record),
+      pdfHash: record.output?.pdfHashSha256,
+      jsonHash: record.output?.jsonHashSha256,
+      savedAt: new Date().toISOString()
+    }));
+  }
+
+  async function readOfficialFiles(record) {
+    const id = outputStorageId(record?.recordId);
+    if (!id) return null;
+    try { return await withOutputStore('readonly', store => store.get(id)); }
+    catch { return null; }
+  }
+
+  async function deleteOfficialFiles(recordId) {
+    const id = outputStorageId(recordId);
+    if (!id) return;
+    try { await withOutputStore('readwrite', store => store.delete(id)); } catch {}
+  }
+
+  /** Remove as chaves globais antigas que poderiam expor dados de outro usuário. */
+  function purgeLegacySharedStorage() {
+    ['petDigitalDraftV7','petDigitalRecordsV1'].forEach(key => localStorage.removeItem(key));
+  }
+
+  /** Limpa estado em memória ao trocar/sair de usuário, sem apagar os dados próprios já separados. */
+  function clearWorkspaceMemory() {
+    finalizedRecord = null;
+    const finalize = $('#finalizeBtn');
+    if (finalize) { finalize.disabled = false; finalize.textContent = 'Finalizar PET oficial'; }
+    finalizationInProgress = false;
+    people = [];
+    const form = $('#petForm');
+    if (form) form.reset();
+    resetPeople();
+    renderPeople();
+    setDefaultDateTime();
+    const printArea = $('#printArea');
+    if (printArea) { printArea.innerHTML = ''; printArea.classList.add('hidden'); }
+    ['#integrityPanel','#serverPanel'].forEach(sel => $(sel)?.classList.add('hidden'));
+    ['#registerServerBtn','#printBtn','#sharePdfBtn','#exportBtn','#shareJsonBtn'].forEach(sel => { const b=$(sel); if (b) b.disabled=true; });
+    const records = $('#recordsList'); if (records) records.innerHTML = '';
+  }
+
+  /** Carrega somente o rascunho e os registros pertencentes ao usuário autenticado. */
+  function loadUserWorkspace() {
+    clearWorkspaceMemory();
+    loadDraft();
+    renderRecords();
+  }
+
   /**
    * Abre o IndexedDB usado para armazenar a chave privada não exportável.
    * Ativação: criação, assinatura, exibição de status e exclusão da chave local.
@@ -221,21 +356,72 @@
     }
   }
 
-  /** Busca a chave local no IndexedDB. */
-  async function readLocalKeyPair() {
-    try { return await withKeyStore('readonly', store => store.get(KEY_DB_ID)); }
+  /**
+   * Retorna o identificador da chave do usuário atualmente autenticado.
+   * O quê: impede que duas contas que usem o mesmo navegador compartilhem a mesma chave privada.
+   * Como: combina um prefixo fixo com o ID interno do usuário devolvido pelo Worker.
+   * Quando: em toda leitura, criação ou exclusão da proteção criptográfica local.
+   */
+  function currentKeyDbId() {
+    const userId = (authState || loadAuthState())?.user?.id;
+    return userId ? `${KEY_DB_PREFIX}${userId}` : null;
+  }
+
+  /** Lê uma chave específica da store local. */
+  async function readKeyById(id) {
+    if (!id) return null;
+    try { return await withKeyStore('readonly', store => store.get(id)); }
     catch { return null; }
   }
 
-  /** Salva a chave local no IndexedDB. */
-  async function writeLocalKeyPair(record) {
-    await withKeyStore('readwrite', store => store.put(record));
+  /** Exclui uma chave específica da store local. */
+  async function deleteKeyById(id) {
+    if (!id) return;
+    try { await withKeyStore('readwrite', store => store.delete(id)); } catch {}
   }
 
-  /** Apaga a chave local não exportável e remove resíduos antigos de localStorage. */
+  /** Busca somente a chave pertencente ao usuário autenticado. */
+  async function readLocalKeyPair() {
+    return readKeyById(currentKeyDbId());
+  }
+
+  /** Salva a chave no espaço local exclusivo da conta autenticada. */
+  async function writeLocalKeyPair(record) {
+    const id = currentKeyDbId();
+    const userId = (authState || loadAuthState())?.user?.id;
+    if (!id || !userId) throw new Error('Faça login antes de configurar a proteção deste dispositivo.');
+    await withKeyStore('readwrite', store => store.put({ ...record, id, ownerUserId: userId }));
+  }
+
+  /** Apaga somente a chave local da conta autenticada e remove resíduos antigos. */
   async function deleteLocalKeyPair() {
-    try { await withKeyStore('readwrite', store => store.delete(KEY_DB_ID)); } catch {}
+    await deleteKeyById(currentKeyDbId());
     localStorage.removeItem(STORAGE_KEYPAIR);
+  }
+
+  /**
+   * Migra com segurança a chave global usada até a v1.1.3.
+   * O quê: preserva uma chave antiga somente quando o servidor confirma que ela pertence à conta atual.
+   * Como: compara o hash da chave antiga com os dispositivos do usuário retornados pelo D1; sem correspondência,
+   * a chave antiga não é usada nem atribuída automaticamente a outra pessoa.
+   * Quando: após consultar `/devices`, antes de criar uma nova chave para o usuário atual.
+   */
+  async function migrateLegacyKeyForCurrentUser(devices = []) {
+    const currentId = currentKeyDbId();
+    const userId = (authState || loadAuthState())?.user?.id;
+    if (!currentId || !userId) return null;
+    const current = await readKeyById(currentId);
+    if (current?.privateKey && current?.publicKey) return current;
+    const legacy = await readKeyById(LEGACY_KEY_DB_ID);
+    if (!legacy?.privateKey || !legacy?.publicKeyHash) return null;
+    const belongsToCurrentUser = devices.some(device =>
+      device.user_id === userId && device.public_key_hash === legacy.publicKeyHash
+    );
+    if (!belongsToCurrentUser) return null;
+    const migrated = { ...legacy, id: currentId, ownerUserId: userId, migratedAt: new Date().toISOString() };
+    await withKeyStore('readwrite', store => store.put(migrated));
+    await deleteKeyById(LEGACY_KEY_DB_ID);
+    return migrated;
   }
 
   /**
@@ -267,7 +453,8 @@
     const privateKey = await crypto.subtle.importKey('jwk', privateJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
     const publicKeyHash = await sha256Hex(publicKey);
     const stored = {
-      id: KEY_DB_ID,
+      id: currentKeyDbId(),
+      ownerUserId: (authState || loadAuthState())?.user?.id,
       algorithm: SIGNATURE_ALGORITHM,
       storage: 'IndexedDB CryptoKey não exportável',
       createdAt: new Date().toISOString(),
@@ -410,6 +597,9 @@
       }
     }
 
+    const canVerify = ['admin', 'gestor', 'verificador'].includes(state?.user?.role);
+    const verifyNav = $('[data-tab="verifyTab"]');
+    verifyNav?.classList.toggle('hidden', !canVerify);
     const isManager = ['admin', 'gestor'].includes(state?.user?.role);
     $('#userManagementSection')?.classList.toggle('hidden', !isManager);
     $('#teamDevicesSection')?.classList.toggle('hidden', !isManager);
@@ -479,25 +669,18 @@
       return false;
     }
 
-    let key;
-    try {
-      key = await ensureKeyPair();
-      await updateKeyStatus();
-    } catch (err) {
-      updateFormAccessStatus('Não foi possível preparar este dispositivo para emissão oficial.', 'bad');
-      alert('Não foi possível preparar este dispositivo: ' + err.message);
-      showTab('systemTab');
-      return false;
-    }
-
     let devices = [];
+    let key;
     try {
       const data = await apiFetch('/devices');
       devices = data.devices || [];
       renderDevicesList(devices);
+      await migrateLegacyKeyForCurrentUser(devices);
+      key = await ensureKeyPair();
+      await updateKeyStatus();
     } catch (err) {
-      updateFormAccessStatus('Não foi possível consultar a autorização deste dispositivo.', 'bad');
-      alert('Não foi possível consultar a autorização deste dispositivo: ' + err.message);
+      updateFormAccessStatus('Não foi possível consultar ou preparar este dispositivo para emissão oficial.', 'bad');
+      alert('Não foi possível preparar este dispositivo: ' + err.message);
       showTab('systemTab');
       return false;
     }
@@ -524,19 +707,25 @@
   }
 
   /**
-   * Garante que o registro pode sair do dispositivo como documento oficial.
-   * O quê: impede PDF/comprovante de PET não registrada no sistema.
-   * Como: confere acesso oficial e, se necessário, registra automaticamente a PET na API.
-   * Quando: antes de imprimir, compartilhar, baixar ou exportar documentos definitivos.
+   * Garante que o documento já foi gerado e registrado como um conjunto único.
+   * O quê: impede exportação de arquivo não vinculado ao servidor.
+   * Como: exige serverRegistration e os arquivos temporários cujos hashes foram registrados.
+   * Quando: antes de abrir, baixar ou compartilhar PDF/comprovante.
    */
   async function ensureRecordReadyForOutput(record, actionLabel = 'gerar documento') {
     if (!record) return false;
     const accessOk = await ensureOfficialAccessOrGuide(actionLabel);
     if (!accessOk) return false;
-    if (!record.serverRegistration) {
-      await registerRecordOnServer(record, { silent: true });
+    if (!record.serverRegistration || !record.output?.pdfHashSha256 || !record.output?.jsonHashSha256) {
+      alert('Esta PET ainda não concluiu a geração e o registro dos dois arquivos oficiais. Use “Finalizar PET oficial” para concluir ou repetir o envio pendente.');
+      return false;
     }
-    return !!record.serverRegistration;
+    const files = await readOfficialFiles(record);
+    if (!files?.pdfFile || !files?.jsonText) {
+      alert('Os arquivos temporários desta PET não estão mais disponíveis neste dispositivo. Use a via já enviada ao supervisor; não é seguro recriar outro PDF com o mesmo registro.');
+      return false;
+    }
+    return true;
   }
 
   /** Cria o primeiro admin usando o token de instalação configurado no Worker. */
@@ -565,6 +754,8 @@
     const data = await apiFetch('/auth/login', { method: 'POST', body: { matricula, password } });
     saveAuthState({ token: data.token, user: data.user, loggedAt: new Date().toISOString() });
     $('#loginPassword').value = '';
+    purgeLegacySharedStorage();
+    loadUserWorkspace();
     await refreshDevices(true);
     if (data.user.mustChangePassword) {
       showTab('systemTab');
@@ -577,9 +768,10 @@
     }
   }
 
-  /** Encerra a sessão local e tenta revogar no Worker. */
+  /** Encerra a sessão, elimina dados em memória e impede que a próxima conta veja a área anterior. */
   async function logout() {
     try { if (authToken()) await apiFetch('/auth/logout', { method: 'POST', body: {} }); } catch {}
+    clearWorkspaceMemory();
     saveAuthState(null);
     if ($('#devicesList')) $('#devicesList').innerHTML = '';
     if ($('#usersList')) $('#usersList').innerHTML = '';
@@ -588,7 +780,6 @@
       box.className = 'validation-box warn';
       box.textContent = 'Entre no sistema para autorizar ou consultar este dispositivo.';
     }
-    showTab('formTab');
     setTimeout(() => $('#loginMatricula')?.focus(), 100);
   }
 
@@ -598,6 +789,8 @@
     try {
       const data = await apiFetch('/auth/me');
       saveAuthState({ ...authState, user: data.user });
+      purgeLegacySharedStorage();
+      loadUserWorkspace();
       await refreshDevices(true);
     } catch {
       saveAuthState(null);
@@ -848,6 +1041,7 @@
     try {
       const data = await apiFetch('/devices');
       renderDevicesList(data.devices || []);
+      await migrateLegacyKeyForCurrentUser(data.devices || []);
       const key = await readLocalKeyPair();
       const state = authState || loadAuthState();
       const mine = key ? (data.devices || []).filter(d => d.public_key_hash === key.publicKeyHash && d.user_id === state?.user?.id) : [];
@@ -897,50 +1091,6 @@
     } finally {
       if (button) button.disabled = false;
     }
-  }
-
-  /** Monta o resumo de participantes para registrar apenas hashes no servidor. */
-  function serverParticipantHashes(record) {
-    return (record.payload?.professionals || []).map(p => ({
-      participantRole: p.type,
-      name: p.nome,
-      matricula: p.matricula,
-      photoHash: p.photoHash || '',
-      signatureImageHash: p.signatureHash || '',
-      signedAtClient: p.signedAt || ''
-    }));
-  }
-
-  /** Registra no sistema o comprovante técnico da PET, sem enviar PDF/fotos/assinaturas. */
-  async function registerRecordOnServer(record, options = {}) {
-    if (!record) return;
-    if (!authToken()) {
-      if (!options.silent) alert('Faça login para registrar a PET no sistema.');
-      return;
-    }
-    const sig = record.integrity?.supervisorCryptographicSignature || {};
-    const body = {
-      numeroPet: record.payload?.fields?.petNumero,
-      recordId: record.recordId,
-      validationProfile: record.payload?.proofStandard?.validationProfile || VALIDATION_PROFILE,
-      schemaVersion: record.payload?.schema || PAYLOAD_SCHEMA,
-      payloadHash: record.integrity?.payloadHashSha256,
-      pdfProofHash: latestPdfProof(record)?.pdfProofHashSha256 || null,
-      petSignatureB64: sig.signatureBase64,
-      pdfProofSignatureB64: latestPdfProof(record)?.cryptographicSignature?.signatureBase64 || null,
-      publicKeyHash: sig.publicKeyHash,
-      publicKeyJwk: sig.publicKey,
-      clientGeneratedAt: record.integrity?.finalizedAt,
-      clientTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
-      geo: latestPdfProof(record)?.geolocation || null,
-      participants: serverParticipantHashes(record)
-    };
-    const data = await apiFetch('/pet-records', { method: 'POST', body });
-    record.serverRegistration = data.petRecord;
-    updateStoredRecord(record);
-    renderIntegrity(record);
-    renderServerPanel(`PET registrada no sistema. Nº PET: ${data.petRecord.numero_pet}. Status: ${data.petRecord.status}.`, 'ok');
-    if (!options.silent) alert('PET registrada no sistema.');
   }
 
   /** Mostra status de sincronização/registro no servidor. */
@@ -1156,9 +1306,9 @@
       signatureImageEncoding: 'data-url-base64-png',
       validationSummary: [
         'Recalcular o hash do payload usando JSON canônico estável.',
-        'Comparar o hash recalculado com payloadHashSha256 salvo no dossiê.',
-        'Verificar a assinatura ECDSA P-256/SHA-256 com a chave pública salva no JSON.',
-        'Repetir a validação para cada prova de geração de PDF registrada.'
+        'Recalcular os hashes dos bytes reais do PDF e do arquivo JSON.',
+        'Consultar o registro exato no servidor pelo número, hashes, emissor e dispositivo.',
+        'Verificar as assinaturas ECDSA com a chave pública autorizada no servidor na emissão.'
       ]
     };
   }
@@ -1176,7 +1326,7 @@
       warnings.push(`${contextLabel}: padrão de validação não declarado; tentando validar pelo padrão atual.`);
       return { errors, warnings };
     }
-    if (standard.validationProfile !== VALIDATION_PROFILE) errors.push(`${contextLabel}: perfil de validação incompatível.`);
+    if (!ACCEPTED_VALIDATION_PROFILES.has(standard.validationProfile)) errors.push(`${contextLabel}: perfil de validação incompatível.`);
     if (standard.canonicalizationAlgorithm !== CANONICALIZATION_ALGORITHM) errors.push(`${contextLabel}: regra de JSON canônico incompatível.`);
     if (standard.hashAlgorithm !== HASH_ALGORITHM) errors.push(`${contextLabel}: algoritmo de hash incompatível.`);
     if (standard.signatureAlgorithm !== SIGNATURE_ALGORITHM) errors.push(`${contextLabel}: algoritmo de assinatura incompatível.`);
@@ -1229,23 +1379,37 @@
   }
 
   /**
-   * Renderiza a tabela de checklist na tela.
-   * Ativação: durante a inicialização do aplicativo.
-   * O que faz: transforma cada item de `checklistItems` em uma linha com rádio S/N/N/A
-   * e nomes de campo padronizados (`check_01`, `check_02` etc.).
+   * Renderiza o checklist e um campo de justificativa para cada resposta N/A.
+   * O campo fica oculto até N/A ser escolhido; itens críticos não permitem N/A.
    */
   function renderChecklist() {
     const tbody = $('#checklistTable tbody');
     tbody.innerHTML = checklistItems.map((item, index) => {
       const n = String(index + 1).padStart(2, '0');
-      return `<tr>
+      const naDisabled = NA_FORBIDDEN_ITEMS.has(n);
+      return `<tr data-check-row="${n}">
         <td>${n}</td>
-        <td>${escapeHtml(item)}</td>
+        <td>${escapeHtml(item)}${naDisabled ? '<br><small class="critical-note">Item crítico: N/A não permitido.</small>' : ''}</td>
         <td><input required type="radio" name="check_${n}" value="S" aria-label="${n} Sim" /></td>
         <td><input required type="radio" name="check_${n}" value="N" aria-label="${n} Não" /></td>
-        <td><input required type="radio" name="check_${n}" value="NA" aria-label="${n} Não se aplica" /></td>
+        <td><input required type="radio" name="check_${n}" value="NA" aria-label="${n} Não se aplica" ${naDisabled ? 'disabled' : ''} /></td>
+      </tr>
+      <tr class="na-justification-row hidden" data-na-row="${n}">
+        <td></td><td colspan="4"><label>Justificativa do N/A — item ${n}
+          <input name="check_${n}_justification" minlength="10" maxlength="300" placeholder="Explique objetivamente por que o item não se aplica" />
+        </label></td>
       </tr>`;
     }).join('');
+  }
+
+  /** Mostra/oculta a justificativa do N/A conforme a resposta selecionada. */
+  function updateNaJustificationVisibility(number) {
+    const selected = $(`input[name="check_${number}"]:checked`);
+    const row = $(`[data-na-row="${number}"]`);
+    const input = $(`[name="check_${number}_justification"]`);
+    const active = selected?.value === 'NA';
+    row?.classList.toggle('hidden', !active);
+    if (input) { input.required = active; if (!active) input.value = ''; }
   }
 
   /**
@@ -1451,6 +1615,8 @@
   function markFinalizedRecordStale() {
     if (!finalizedRecord) return;
     finalizedRecord = null;
+    const finalizeButton = $('#finalizeBtn');
+    if (finalizeButton) { finalizeButton.disabled = false; finalizeButton.textContent = 'Finalizar PET oficial'; }
     ['#registerServerBtn', '#printBtn', '#sharePdfBtn', '#exportBtn', '#shareJsonBtn'].forEach(selector => {
       const btn = $(selector);
       if (btn) btn.disabled = true;
@@ -1563,22 +1729,33 @@
       }
     });
 
+    // N/A exige justificativa e é limitado a itens não críticos.
+    $('#checklistTable').addEventListener('change', event => {
+      const match = event.target.name?.match(/^check_(\d{2})$/);
+      if (match) updateNaJustificationVisibility(match[1]);
+    });
+
     // Botões principais do formulário e ações de rascunho/finalização/exportação.
     $('#addEntrante').addEventListener('click', () => addProfessional('entrante'));
     $('#addVigia').addEventListener('click', () => addProfessional('vigia'));
     $('#saveDraft').addEventListener('click', () => { saveDraft(); alert('Rascunho salvo neste dispositivo.'); });
     $('#clearDraft').addEventListener('click', () => {
       if (!confirm('Deseja limpar o formulário e apagar o rascunho local?')) return;
-      localStorage.removeItem(STORAGE_DRAFT);
+      const draftKey = currentDraftKey();
+      if (draftKey) localStorage.removeItem(draftKey);
       finalizedRecord = null;
       $('#petForm').reset();
+      checklistItems.forEach((_, idx) => updateNaJustificationVisibility(String(idx + 1).padStart(2, '0')));
       setDefaultDateTime();
       resetPeople();
       renderPeople();
       $('#validationBox').className = 'validation-box';
       $('#validationBox').textContent = 'Preencha o formulário e clique em “Validar”. Para finalizar e gerar os documentos oficiais, é necessário estar logado e com o dispositivo autorizado.';
       $('#integrityPanel').classList.add('hidden');
+      $('#finalizeBtn').disabled = false;
+      $('#finalizeBtn').textContent = 'Finalizar PET oficial';
       $('#registerServerBtn').disabled = true;
+      $('#registerServerBtn').classList.add('hidden');
       $('#printBtn').disabled = true;
       $('#sharePdfBtn').disabled = true;
       $('#exportBtn').disabled = true;
@@ -1591,20 +1768,21 @@
     });
 
     $('#finalizeBtn').addEventListener('click', finalizeRecord);
-    $('#registerServerBtn').addEventListener('click', () => registerRecordOnServer(finalizedRecord));
-    $('#printBtn').addEventListener('click', event => printRecordWithProof(finalizedRecord, event.currentTarget));
+    $('#registerServerBtn').addEventListener('click', event => retryPendingRecordRegistration(finalizedRecord, event.currentTarget));
+    $('#printBtn').addEventListener('click', event => openOfficialPdf(finalizedRecord, event.currentTarget));
     $('#sharePdfBtn').addEventListener('click', event => sharePdfRecord(finalizedRecord, event.currentTarget));
     $('#exportBtn').addEventListener('click', async () => {
       if (!finalizedRecord) return;
       const ready = await ensureRecordReadyForOutput(finalizedRecord, 'salvar o comprovante técnico');
       if (!ready) return;
-      downloadJson(finalizedRecord, jsonFilename(finalizedRecord));
+      const files = await readOfficialFiles(finalizedRecord);
+      if (files?.jsonText) downloadBlob(new Blob([files.jsonText], { type: 'application/json' }), files.jsonFilename || jsonFilename(finalizedRecord));
     });
     $('#shareJsonBtn').addEventListener('click', event => shareJsonRecord(finalizedRecord, event.currentTarget));
 
     // Eventos das abas auxiliares: histórico local, validador de JSON e gerenciamento da chave.
     $('#refreshRecords').addEventListener('click', renderRecords);
-    $('#verifyFile').addEventListener('change', verifyFile);
+    $('#verifyFilesBtn').addEventListener('click', () => verifyFiles());
     $('#exportPublicKey').addEventListener('click', exportPublicKey);
     $('#resetKey').addEventListener('click', () => resetLocalDeviceProtection().catch(err => alert('Não foi possível apagar a proteção local: ' + err.message)));
 
@@ -1659,6 +1837,7 @@
       setTimeout(() => $('#loginMatricula')?.focus(), 100);
       return;
     }
+    if (tabId === 'verifyTab' && !['admin','gestor','verificador'].includes(state.user.role)) { alert('Seu perfil não possui acesso à validação oficial.'); return; }
     $$('.tab').forEach(t => t.classList.remove('active'));
     const target = $('#' + tabId) || $('#formTab');
     target.classList.add('active');
@@ -1706,7 +1885,8 @@
     return checklistItems.map((item, idx) => {
       const n = String(idx + 1).padStart(2, '0');
       const selected = $(`input[name="check_${n}"]:checked`);
-      return { number: n, item, answer: selected ? selected.value : '' };
+      const justification = normalizeText($(`[name="check_${n}_justification"]`)?.value);
+      return { number: n, item, answer: selected ? selected.value : '', justification };
     });
   }
 
@@ -1762,34 +1942,29 @@
   }
 
   /**
-   * Monta o payload que será hasheado e assinado.
-   * Ativação: clique em 'Finalizar e assinar PET', após validação sem impedimentos.
-   * O que faz: junta campos, número automático, checklist, profissionais e aviso normativo
-   * em uma estrutura única e estável para fins de integridade.
+   * Monta o payload assinado. O número é criado uma única vez por tentativa oficial.
+   * O emissor autenticado também entra no payload, vinculando usuário, matrícula e conteúdo.
    */
-  function buildPayload() {
+  function buildPayload(existingPetNumber = '') {
     const fields = collectFormFields();
-    fields.petNumero = generatePetNumber(fields);
+    fields.petNumero = existingPetNumber || generatePetNumber(fields);
     fields.petNumeroGeradoAutomaticamente = 'Sim';
+    const user = currentUser();
     return {
       schema: PAYLOAD_SCHEMA,
       proofStandard: buildProofStandard('PET_PAYLOAD'),
+      issuedBy: { userId: user?.id || '', name: user?.name || '', matricula: user?.matricula || '', role: user?.role || '' },
       fields,
       checklist: collectChecklist(),
       professionals: collectPeople(),
       regulatoryNotice: {
         nr33: 'Permissão de Entrada e Trabalho para espaços confinados; registros devem ser mantidos pela organização.',
-        validationCriteria: 'O2 > 19,5 e < 23; LIE < 10; H2S < 5 ppm; CO < 25 ppm; respostas do checklist sem impeditivos.'
+        validationCriteria: 'O2 > 19,5 e < 23; LIE < 10; H2S < 5 ppm; CO < 25 ppm; checklist sem impeditivos; N/A limitado e justificado.'
       }
     };
   }
 
-  /**
-   * Executa as validações automáticas antes da finalização.
-   * Ativação: botão 'Validar' e também antes de finalizar.
-   * O que faz: verifica campos obrigatórios, checklist, condição IPVS, compatibilidade de
-   * ar mandado, medições de gases, foto/assinatura dos participantes e suporte a WebCrypto.
-   */
+  /** Executa todas as regras impeditivas antes da emissão oficial. */
   function validateCurrentForm() {
     syncPeopleFromInputs();
     const form = $('#petForm');
@@ -1804,49 +1979,41 @@
 
     const checklist = collectChecklist();
     checklist.forEach(c => { if (!c.answer) errors.push(`Checklist item ${c.number} sem resposta.`); });
-    // Regra geral do modelo: respostas negativas em itens de controle bloqueiam a entrada.
-    // Exceções lógicas do próprio formulário: item 12 deve ser NÃO para indicar ausência de IPVS;
-    // itens 15 e 20 indicam necessidade de controles específicos e podem ser NÃO/N/A conforme avaliação técnica.
+    const naItems = checklist.filter(c => c.answer === 'NA');
+    if (naItems.length > MAX_NA_ITEMS) errors.push(`Use N/A somente quando indispensável. Limite: ${MAX_NA_ITEMS} itens; informado: ${naItems.length}.`);
+    naItems.forEach(c => {
+      if (NA_FORBIDDEN_ITEMS.has(c.number)) errors.push(`Item ${c.number} é crítico e não aceita N/A.`);
+      if (normalizeText(c.justification).length < 10) errors.push(`Item ${c.number}: justifique o N/A com pelo menos 10 caracteres.`);
+    });
+
     const negativeBlocking = checklist.filter(c => c.answer === 'N' && !['12', '15', '20'].includes(c.number));
-    if (negativeBlocking.length) {
-      errors.push(`Há ${negativeBlocking.length} item(ns) de controle marcado(s) como “NÃO”. A entrada deve ser bloqueada até correção técnica.`);
-      negativeBlocking.slice(0, 6).forEach(c => warnings.push(`Item ${c.number}: ${c.item}`));
-    }
+    if (negativeBlocking.length) errors.push(`Há ${negativeBlocking.length} item(ns) impeditivo(s) marcado(s) como NÃO.`);
+    const answer = n => checklist.find(c => c.number === n)?.answer;
+    if (answer('12') !== 'N') errors.push('Item 12 deve estar marcado como NÃO para confirmar ausência de atmosfera IPVS.');
+    if (answer('15') === 'S' && answer('19') !== 'S') errors.push('Item 15 indica necessidade de ar mandado, mas o item 19 não confirma linha de ar instalada e operando.');
+    if (answer('20') === 'S') warnings.push('Há necessidade de ferramentas intrinsecamente seguras. Confira a especificação antes da entrada.');
 
-    const ipvsAnswer = checklist.find(c => c.number === '12')?.answer;
-    if (ipvsAnswer === 'S') errors.push('Item 12 indica atmosfera IPVS. Não libere entrada sem procedimento específico e medidas compatíveis.');
-    if (ipvsAnswer === 'NA') warnings.push('Item 12 marcado como N/A. Confira se a avaliação de atmosfera perigosa/IPVS foi registrada corretamente.');
-
-    const arMandado = checklist.find(c => c.number === '15')?.answer;
-    const linhaAr = checklist.find(c => c.number === '19')?.answer;
-    if (arMandado === 'S' && linhaAr !== 'S') errors.push('Item 15 indica necessidade de ar mandado, mas o item 19 não confirma linha de ar instalada e operando.');
-    if (checklist.find(c => c.number === '20')?.answer === 'S') warnings.push('Item 20: há necessidade de ferramentas elétricas intrinsecamente seguras. Confira especificação e liberação antes da entrada.');
-
-    const detectorOk = checklist.find(c => c.number === '10')?.answer;
-    if (detectorOk === 'S' && !form.elements.detectorCalibracao.value) warnings.push('Item 10 marcado como SIM, mas a data de validade/calibração do detector não foi informada.');
-    if (detectorOk === 'S' && !normalizeText(form.elements.detectorId.value)) warnings.push('Item 10 marcado como SIM, mas o identificador do detector não foi informado.');
+    if (answer('10') !== 'S') errors.push('Item 10 deve confirmar que a calibração do detector está atualizada.');
+    if (!normalizeText(form.elements.detectorId.value)) errors.push('Informe o identificador do detector.');
+    if (!form.elements.detectorCalibracao.value) errors.push('Informe a validade/calibração do detector.');
+    if (form.elements.detectorCalibracao.value && form.elements.detectorCalibracao.value < (form.elements.data.value || todayISO())) errors.push('A validade/calibração do detector está vencida na data da PET.');
 
     const gasChecks = checkGasMeasurements();
     errors.push(...gasChecks.errors);
     warnings.push(...gasChecks.warnings);
 
-    const typeCounts = people.reduce((acc, p) => {
-      acc[p.type] = (acc[p.type] || 0) + 1;
-      return acc;
-    }, {});
+    const typeCounts = people.reduce((acc, p) => { acc[p.type] = (acc[p.type] || 0) + 1; return acc; }, {});
     if (!typeCounts.entrante) errors.push('Inclua pelo menos um entrante.');
     if (!typeCounts.vigia) errors.push('Inclua pelo menos um vigia.');
-    if (!typeCounts.supervisor) errors.push('Inclua o supervisor de entrada.');
+    if (typeCounts.supervisor !== 1) errors.push('Inclua exatamente um supervisor de entrada.');
 
-    // Todos os cartões exibidos são tratados como participantes efetivos da PET.
-    // Se um entrante/vigia adicional foi incluído por engano, ele deve ser removido antes de finalizar.
     people.forEach(p => {
       if (!normalizeText(p.nome)) errors.push(`${p.role}: nome obrigatório.`);
       if (!normalizeText(p.matricula)) errors.push(`${p.role}: matrícula obrigatória.`);
-      if (!p.photoDataUrl) errors.push(`${p.role}: foto obrigatória, com rosto do servidor e crachá funcional visível.`);
+      if (!p.photoDataUrl) errors.push(`${p.role}: foto obrigatória, com rosto e crachá funcional visível.`);
       if (!p.signatureDataUrl) errors.push(`${p.role}: assinatura obrigatória.`);
-      if (p._dirtySignature) errors.push(`${p.role}: assinatura foi alterada no canvas, mas ainda não foi registrada. Clique em “Registrar assinatura”.`);
-      if (p.signatureDataUrl && p.signatureMetrics && !p.signatureMetrics.isSigned) errors.push(`${p.role}: assinatura inválida ou vazia. Limpe e assine novamente.`);
+      if (p._dirtySignature) errors.push(`${p.role}: assinatura alterada, mas ainda não registrada.`);
+      if (p.signatureDataUrl && p.signatureMetrics && !p.signatureMetrics.isSigned) errors.push(`${p.role}: assinatura inválida ou vazia.`);
     });
 
     const matriculas = new Map();
@@ -1854,40 +2021,27 @@
       const mat = normalizeText(p.matricula).toLowerCase();
       if (!mat) return;
       const list = matriculas.get(mat) || [];
-      list.push(p.role);
-      matriculas.set(mat, list);
+      list.push(p.role); matriculas.set(mat, list);
     });
-    matriculas.forEach((roles, mat) => {
-      if (roles.length > 1) warnings.push(`Matrícula repetida (${mat}) em: ${roles.join(', ')}. Confira se não houve duplicidade de cadastro.`);
-    });
+    matriculas.forEach((roles, mat) => { if (roles.length > 1) errors.push(`Matrícula repetida (${mat}) em: ${roles.join(', ')}.`); });
 
     const supervisorCard = people.find(p => p.type === 'supervisor');
     const supervisorField = normalizeText(form.elements.supervisorEntrada.value).toLowerCase();
     const supervisorName = normalizeText(supervisorCard?.nome).toLowerCase();
-    if (supervisorField && supervisorName && supervisorField !== supervisorName) {
-      warnings.push('O nome do “Supervisor de entrada” na identificação está diferente do nome informado no cartão de assinatura do supervisor.');
-    }
+    if (supervisorField && supervisorName && supervisorField !== supervisorName) errors.push('O supervisor da identificação está diferente do supervisor que assinou.');
 
     const emission = form.elements.horaEmissao.value;
     const termino = form.elements.horaTermino.value;
-    if (emission && termino && termino <= emission) warnings.push('Hora de término igual ou anterior à emissão. Confira se o serviço passa da meia-noite ou ajuste o horário.');
-
-    if (!crypto?.subtle) errors.push('Este navegador não oferece WebCrypto. A assinatura criptográfica não está disponível.');
-
+    if (emission && termino && termino <= emission) warnings.push('Hora de término igual ou anterior à emissão. Confira serviço após meia-noite.');
+    if (!crypto?.subtle) errors.push('Este navegador não oferece os recursos criptográficos necessários.');
     return { ok: errors.length === 0, errors, warnings };
   }
 
-  /**
-   * Valida as medições de gases perigosos.
-   * Ativação: chamada por `validateCurrentForm`.
-   * O que faz: lê O₂, %LIE, H₂S e CO de cada linha preenchida, aplica os limites do modelo
-   * e alerta sobre calibração vencida do detector, quando informada.
-   */
+  /** Valida medições atmosféricas e impede valores negativos ou fora dos limites. */
   function checkGasMeasurements() {
     const form = $('#petForm');
     const errors = [];
     const warnings = [];
-    // Helper local: converte o conteúdo do input de gás em número ou `null` se vazio/inválido.
     function val(name) {
       const raw = form.elements[name]?.value;
       if (raw === '') return null;
@@ -1899,23 +2053,20 @@
       { key: 'ventilacao', label: 'Teste após ventilação', required: false }
     ];
     rows.forEach(row => {
-      const values = {
-        o2: val(`gas_${row.key}_o2`),
-        lie: val(`gas_${row.key}_lie`),
-        h2s: val(`gas_${row.key}_h2s`),
-        co: val(`gas_${row.key}_co`)
-      };
+      const values = { o2: val(`gas_${row.key}_o2`), lie: val(`gas_${row.key}_lie`), h2s: val(`gas_${row.key}_h2s`), co: val(`gas_${row.key}_co`) };
       const any = Object.values(values).some(v => v !== null) || form.elements[`gas_${row.key}_hora`]?.value;
       if (row.required || any) {
-        Object.entries(values).forEach(([k, v]) => { if (v === null) errors.push(`${row.label}: campo ${k.toUpperCase()} não preenchido.`); });
-        if (values.o2 !== null && !(values.o2 > 19.5 && values.o2 < 23)) errors.push(`${row.label}: O₂ fora do intervalo seguro informado no modelo.`);
+        if (!form.elements[`gas_${row.key}_hora`]?.value) errors.push(`${row.label}: hora não preenchida.`);
+        Object.entries(values).forEach(([k, v]) => {
+          if (v === null) errors.push(`${row.label}: campo ${k.toUpperCase()} não preenchido ou inválido.`);
+          else if (v < 0) errors.push(`${row.label}: ${k.toUpperCase()} não pode ser negativo.`);
+        });
+        if (values.o2 !== null && !(values.o2 > 19.5 && values.o2 < 23)) errors.push(`${row.label}: O₂ fora do intervalo seguro.`);
         if (values.lie !== null && !(values.lie < 10)) errors.push(`${row.label}: inflamável (%LIE) igual ou acima de 10%.`);
         if (values.h2s !== null && !(values.h2s < 5)) errors.push(`${row.label}: H₂S igual ou acima de 5 ppm.`);
         if (values.co !== null && !(values.co < 25)) errors.push(`${row.label}: CO igual ou acima de 25 ppm.`);
       }
     });
-    const detectorCal = form.elements.detectorCalibracao.value;
-    if (detectorCal && detectorCal < todayISO()) warnings.push('A validade/calibração do detector está vencida conforme a data informada.');
     return { errors, warnings };
   }
 
@@ -1935,165 +2086,209 @@
   }
 
   /**
-   * Finaliza a PET oficial e cria o comprovante técnico.
-   * Ativação: clique no botão “Finalizar PET oficial”.
-   * O que faz: exige login/dispositivo autorizado, valida o formulário, assina tecnicamente
-   * o registro, salva localmente e registra a emissão no sistema antes de liberar PDF/comprovante.
+   * Finaliza a PET como operação única: gera PDF, calcula hashes reais, gera o JSON exato e registra tudo.
+   * O botão fica bloqueado durante o envio e, após sucesso, exige limpar/iniciar nova emissão.
    */
   async function finalizeRecord() {
-    const accessOk = await ensureOfficialAccessOrGuide('finalizar a PET oficial');
-    if (!accessOk) return;
-
-    const validation = validateCurrentForm();
-    showValidation(validation);
-    if (!validation.ok) {
-      alert('Não é possível finalizar enquanto houver impedimentos automáticos.');
+    if (finalizationInProgress) return;
+    if (finalizedRecord?.serverRegistration) {
+      alert('Esta PET já foi finalizada. Para uma nova emissão, use “Limpar formulário” e confirme o início de uma nova PET.');
       return;
     }
-    const payload = buildPayload();
-    const payloadHash = await sha256Hex(payload);
-    const signature = await signPayloadHash(payloadHash);
-    const recordId = payloadHash.slice(0, 16).toUpperCase();
-    finalizedRecord = {
-      recordType: RECORD_TYPE,
-      recordId,
-      payload,
-      integrity: {
-        payloadHashSha256: payloadHash,
-        supervisorCryptographicSignature: signature,
-        finalizedAt: new Date().toISOString(),
-        validationWarnings: validation.warnings
+    const accessOk = await ensureOfficialAccessOrGuide('finalizar a PET oficial');
+    if (!accessOk) return;
+    const validation = validateCurrentForm();
+    showValidation(validation);
+    if (!validation.ok) return alert('Não é possível finalizar enquanto houver impedimentos automáticos.');
+
+    const button = $('#finalizeBtn');
+    finalizationInProgress = true;
+    if (button) { button.disabled = true; button.textContent = 'Gerando e registrando...'; }
+    try {
+      // Em uma tentativa pendente, reaproveita número, conteúdo e idempotência para não duplicar emissão.
+      let record = finalizedRecord;
+      if (!record?.pendingOfficialRegistration) {
+        const payload = buildPayload();
+        const payloadHash = await sha256Hex(payload);
+        const signature = await signPayloadHash(payloadHash);
+        record = {
+          recordType: RECORD_TYPE,
+          recordId: payloadHash.slice(0, 16).toUpperCase(),
+          idempotencyKey: crypto.randomUUID(),
+          payload,
+          integrity: {
+            payloadHashSha256: payloadHash,
+            supervisorCryptographicSignature: signature,
+            finalizedAt: new Date().toISOString(),
+            validationWarnings: validation.warnings,
+            pdfGenerationProofs: []
+          },
+          pendingOfficialRegistration: true
+        };
+        finalizedRecord = record;
       }
-    };
-    saveRecord(finalizedRecord);
-    renderIntegrity(finalizedRecord);
-    renderPrintArea(finalizedRecord);
-    localStorage.removeItem(STORAGE_DRAFT);
 
-    try {
-      await registerRecordOnServer(finalizedRecord, { silent: true });
-      $('#registerServerBtn').disabled = true;
-      $('#printBtn').disabled = false;
-      $('#sharePdfBtn').disabled = false;
-      $('#exportBtn').disabled = false;
-      $('#shareJsonBtn').disabled = false;
-      updateFormAccessStatus('PET oficial finalizada e registrada no sistema. Gere o PDF e o comprovante técnico para enviar ao supervisor.', 'ok');
-      alert('PET oficial finalizada e registrada no sistema. Agora gere o PDF e o comprovante técnico e envie ao supervisor responsável.');
-    } catch (err) {
-      $('#registerServerBtn').disabled = false;
-      $('#printBtn').disabled = true;
-      $('#sharePdfBtn').disabled = true;
-      $('#exportBtn').disabled = true;
-      $('#shareJsonBtn').disabled = true;
-      renderServerPanel('A PET foi assinada localmente, mas não foi registrada no sistema: ' + err.message, 'bad');
-      alert('A PET não foi liberada para PDF/comprovante porque o registro no sistema falhou: ' + err.message);
-    }
-  }
-
-  /**
-   * Anexa uma nova prova de geração de PDF ao registro.
-   * Ativação: impressão, compartilhamento de PDF e compartilhamento de pacote com PDF.
-   * O que faz: coleta IP/GPS/data/hora, assina a prova, atualiza o registro local e redesenha
-   * a área de impressão com os dados probatórios mais recentes.
-   */
-  async function appendPdfProofAndRender(record) {
-    const proof = await buildPdfGenerationProof(record);
-    record.integrity.pdfGenerationProofs = record.integrity.pdfGenerationProofs || [];
-    record.integrity.pdfGenerationProofs.push(proof);
-    record.integrity.latestPdfProofHashSha256 = proof.pdfProofHashSha256;
-    finalizedRecord = record;
-    updateStoredRecord(record);
-    renderIntegrity(record);
-    renderPrintArea(record);
-    return proof;
-  }
-
-  /**
-   * Gera a prova de PDF e chama a impressão do navegador.
-   * Ativação: botão 'Gerar PDF oficial' ou botão PDF em registros salvos.
-   * O que faz: coleta IP/GPS/data/hora, assina a prova, atualiza o registro local, prepara
-   * um nome de arquivo mais específico no título do documento e executa `window.print()`.
-   */
-  async function printRecordWithProof(record, triggerButton, options = {}) {
-    if (!record) return;
-    if (!options.skipAccessCheck) {
-      const ready = await ensureRecordReadyForOutput(record, 'gerar o PDF oficial');
-      if (!ready) return;
-    }
-    const button = triggerButton || $('#printBtn');
-    const originalText = button ? button.textContent : '';
-    const originalTitle = document.title;
-    try {
-      if (button) {
-        button.disabled = true;
-        button.textContent = options.skipProof ? 'Preparando PDF...' : 'Coletando prova do PDF...';
+      // A prova é criada antes do PDF, portanto aparece no arquivo que será efetivamente hasheado.
+      if (!latestPdfProof(record)) {
+        const proof = await buildPdfGenerationProof(record);
+        record.integrity.pdfGenerationProofs.push(proof);
+        record.integrity.latestPdfProofHashSha256 = proof.pdfProofHashSha256;
       }
-      if (!options.skipProof) await appendPdfProofAndRender(record);
-      else renderPrintArea(record);
+      renderIntegrity(record);
+      renderPrintArea(record);
 
-      // Muitos navegadores usam document.title como sugestão de nome ao salvar como PDF.
-      document.title = pdfFilename(record).replace(/\.pdf$/i, '');
-      const restoreTitle = () => { document.title = originalTitle; };
-      window.addEventListener('afterprint', restoreTitle, { once: true });
-      window.print();
-      setTimeout(restoreTitle, 1500);
-    } finally {
-      if (button) {
-        button.disabled = false;
-        button.textContent = originalText || 'Gerar PDF oficial';
-      }
-    }
-  }
-
-  /**
-   * Compartilha o comprovante técnico pela folha nativa de compartilhamento do celular/navegador.
-   * Ativação: botão 'Compartilhar comprovante' da PET finalizada ou da aba Registros.
-   * O que faz: cria um arquivo JSON em memória e usa a Web Share API; se o navegador não
-   * suportar compartilhamento de arquivos, faz o download como fallback.
-   */
-  async function shareJsonRecord(record, triggerButton) {
-    if (!record) return;
-    const ready = await ensureRecordReadyForOutput(record, 'compartilhar o comprovante técnico');
-    if (!ready) return;
-    const button = triggerButton || $('#shareJsonBtn');
-    const originalText = button ? button.textContent : '';
-    try {
-      if (button) { button.disabled = true; button.textContent = 'Compartilhando comprovante...'; }
-      const file = createJsonFile(record);
-      await shareFilesOrDownload([file], 'Comprovante PET Digital NR-33', `Comprovante técnico da ${record.payload?.fields?.petNumero || record.recordId}.`);
-    } catch (err) {
-      if (err.name !== 'AbortError') alert('Não foi possível compartilhar o comprovante: ' + err.message);
-    } finally {
-      if (button) { button.disabled = false; button.textContent = originalText || 'Compartilhar comprovante'; }
-    }
-  }
-
-  /**
-   * Compartilha o PDF pela folha nativa de compartilhamento do celular/navegador.
-   * Ativação: botão 'Compartilhar PDF' da PET finalizada ou da aba Registros.
-   * O que faz: adiciona uma prova de geração do PDF, tenta gerar um PDF real no navegador
-   * usando bibliotecas carregadas sob demanda e compartilha o arquivo. Se não for possível,
-   * mantém o fallback seguro de impressão/salvar PDF pelo navegador.
-   */
-  async function sharePdfRecord(record, triggerButton) {
-    if (!record) return;
-    const ready = await ensureRecordReadyForOutput(record, 'compartilhar o PDF oficial');
-    if (!ready) return;
-    const button = triggerButton || $('#sharePdfBtn');
-    const originalText = button ? button.textContent : '';
-    try {
-      if (button) { button.disabled = true; button.textContent = 'Gerando PDF...'; }
-      await appendPdfProofAndRender(record);
       const pdfFile = await createPdfFile(record);
-      if (button) button.textContent = 'Abrindo compartilhamento...';
-      await shareFilesOrDownload([pdfFile], 'PET Digital NR-33 — PDF', `PDF da ${record.payload?.fields?.petNumero || record.recordId}.`);
+      const pdfHash = await sha256BlobHex(pdfFile);
+      const dossier = buildRegisteredDossier(record, pdfHash, pdfFile.name);
+      const jsonText = JSON.stringify(dossier, null, 2);
+      const jsonHash = await sha256Hex(jsonText);
+      record.output = {
+        pdfFilename: pdfFile.name,
+        jsonFilename: jsonFilename(record),
+        pdfHashSha256: pdfHash,
+        jsonHashSha256: jsonHash,
+        generatedAt: new Date().toISOString()
+      };
+      await saveOfficialFiles(record, pdfFile, jsonText);
+
+      await registerRecordOnServer(record, { pdfHash, jsonHash, pdfFile, jsonText });
+      record.pendingOfficialRegistration = false;
+      updateStoredRecord(record);
+      localStorage.removeItem(currentDraftKey());
+      renderIntegrity(record);
+      renderPrintArea(record);
+      ['#printBtn','#sharePdfBtn','#exportBtn','#shareJsonBtn'].forEach(sel => { const b=$(sel); if (b) b.disabled=false; });
+      $('#registerServerBtn').disabled = true;
+      $('#registerServerBtn').classList.add('hidden');
+      if (button) { button.disabled = true; button.textContent = 'PET finalizada'; }
+      updateFormAccessStatus('PET oficial gerada e registrada. Envie o PDF e o comprovante ao supervisor.', 'ok');
+      alert('PET oficial concluída. O PDF e o comprovante foram vinculados ao registro do servidor. Envie os dois arquivos ao supervisor.');
+      saveRecord(record);
+      renderRecords();
     } catch (err) {
-      if (err.name === 'AbortError') return;
-      alert('Não foi possível gerar o PDF para compartilhamento direto. O aplicativo abrirá a tela de impressão/salvar PDF do navegador. Motivo: ' + err.message);
-      await printRecordWithProof(record, button, { skipProof: true, skipAccessCheck: true });
-    } finally {
-      if (button) { button.disabled = false; button.textContent = originalText || 'Compartilhar PDF'; }
+      if (finalizedRecord) {
+        finalizedRecord.pendingOfficialRegistration = true;
+        updateStoredRecord(finalizedRecord);
+      }
+      $('#registerServerBtn').disabled = false;
+      $('#registerServerBtn').classList.remove('hidden');
+      renderServerPanel('A emissão não foi concluída. Nenhum novo número será criado ao tentar novamente: ' + err.message, 'bad');
+      alert('Não foi possível concluir a emissão oficial: ' + err.message + '\nTente novamente; o sistema reutilizará a mesma tentativa para evitar duplicidade.');
+      if (button) { button.disabled = false; button.textContent = 'Tentar finalizar novamente'; }
+    } finally { finalizationInProgress = false; }
+  }
+
+  /** Monta o comprovante técnico exato que será exportado e cujo arquivo é hasheado. */
+  function buildRegisteredDossier(record, pdfHash, pdfName) {
+    return {
+      recordType: record.recordType,
+      recordId: record.recordId,
+      payload: record.payload,
+      integrity: record.integrity,
+      fileIntegrity: {
+        pdfFilename: pdfName,
+        pdfSha256: pdfHash,
+        jsonEncoding: 'UTF-8',
+        jsonSerialization: 'JSON.stringify(obj, null, 2)',
+        serverValidationRequired: true
+      },
+      validationEndpoint: `${API_BASE_URL}/validate-document`
+    };
+  }
+
+  /** Envia PDF e comprovante ao Worker apenas durante a validação; o D1 guarda somente hashes/metadados. */
+  async function registerRecordOnServer(record, fileHashes = {}) {
+    if (!record || !authToken()) throw new Error('Sessão necessária para registrar a PET.');
+    const proof = latestPdfProof(record);
+    if (!proof) throw new Error('Prova do PDF ausente.');
+    const pdfFile = fileHashes.pdfFile || (await readOfficialFiles(record))?.pdfFile;
+    const jsonText = fileHashes.jsonText || (await readOfficialFiles(record))?.jsonText;
+    if (!pdfFile || !jsonText) throw new Error('Arquivos oficiais ausentes para validação no servidor.');
+    const body = {
+      // O Worker extrai payload, assinaturas, prova e hashes diretamente do comprovante,
+      // evitando duplicar fotos/assinaturas no corpo da requisição e reduzindo confiança no cliente.
+      idempotencyKey: record.idempotencyKey,
+      pdfBase64: await blobToBase64(pdfFile),
+      jsonText
+    };
+    const data = await apiFetch('/pet-records', { method: 'POST', body });
+    record.serverRegistration = data.petRecord;
+    renderServerPanel(`PET registrada no sistema. Nº PET: ${data.petRecord.numero_pet}.`, 'ok');
+    return data;
+  }
+
+  /** Repete somente o envio pendente, reutilizando número, arquivos e idempotência já criados. */
+  async function retryPendingRecordRegistration(record, triggerButton) {
+    if (!record?.pendingOfficialRegistration) return;
+    const files = await readOfficialFiles(record);
+    if (!files?.pdfFile || !files?.jsonText || !record.output) {
+      alert('Esta tentativa não possui os arquivos completos. Retorne ao formulário e finalize novamente.');
+      return;
     }
+    const button = triggerButton || $('#registerServerBtn');
+    const original = button?.textContent || '';
+    try {
+      if (button) { button.disabled = true; button.textContent = 'Repetindo registro...'; }
+      await registerRecordOnServer(record, {
+        pdfFile: files.pdfFile,
+        jsonText: files.jsonText
+      });
+      record.pendingOfficialRegistration = false;
+      updateStoredRecord(record);
+      if (record === finalizedRecord) {
+        ['#printBtn','#sharePdfBtn','#exportBtn','#shareJsonBtn'].forEach(sel => { const b=$(sel); if (b) b.disabled=false; });
+        $('#registerServerBtn').classList.add('hidden');
+        $('#finalizeBtn').disabled = true;
+        $('#finalizeBtn').textContent = 'PET finalizada';
+      }
+      renderRecords();
+      alert('Registro concluído sem criar nova PET.');
+    } catch (err) { alert('O registro continua pendente: ' + err.message); }
+    finally { if (button && !record.serverRegistration) { button.disabled = false; button.textContent = original || 'Repetir registro pendente'; } }
+  }
+
+  /** Abre o PDF oficial exato salvo no IndexedDB; não recria arquivo com hash diferente. */
+  async function openOfficialPdf(record, triggerButton) {
+    if (!record) return;
+    if (!await ensureRecordReadyForOutput(record, 'abrir o PDF oficial')) return;
+    const files = await readOfficialFiles(record);
+    const button = triggerButton || $('#printBtn');
+    const original = button?.textContent || '';
+    try {
+      if (button) { button.disabled = true; button.textContent = 'Abrindo PDF...'; }
+      const url = URL.createObjectURL(files.pdfFile);
+      const opened = window.open(url, '_blank', 'noopener');
+      if (!opened) downloadBlob(files.pdfFile, files.pdfFilename || pdfFilename(record));
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } finally { if (button) { button.disabled = false; button.textContent = original || 'Abrir PDF oficial'; } }
+  }
+
+  /** Compartilha o JSON exato cujo hash foi registrado no D1. */
+  async function shareJsonRecord(record, triggerButton) {
+    if (!record || !await ensureRecordReadyForOutput(record, 'compartilhar o comprovante técnico')) return;
+    const files = await readOfficialFiles(record);
+    const button = triggerButton || $('#shareJsonBtn');
+    const original = button?.textContent || '';
+    try {
+      if (button) { button.disabled = true; button.textContent = 'Compartilhando...'; }
+      const file = new File([files.jsonText], files.jsonFilename || jsonFilename(record), { type: 'application/json' });
+      await shareFilesOrDownload([file], 'Comprovante PET Digital NR-33', `Comprovante da ${record.payload?.fields?.petNumero || record.recordId}.`);
+    } catch (err) { if (err.name !== 'AbortError') alert('Não foi possível compartilhar: ' + err.message); }
+    finally { if (button) { button.disabled = false; button.textContent = original || 'Compartilhar comprovante'; } }
+  }
+
+  /** Compartilha o PDF exato cujo hash foi registrado no D1. */
+  async function sharePdfRecord(record, triggerButton) {
+    if (!record || !await ensureRecordReadyForOutput(record, 'compartilhar o PDF oficial')) return;
+    const files = await readOfficialFiles(record);
+    const button = triggerButton || $('#sharePdfBtn');
+    const original = button?.textContent || '';
+    try {
+      if (button) { button.disabled = true; button.textContent = 'Abrindo compartilhamento...'; }
+      const file = files.pdfFile instanceof File ? files.pdfFile : new File([files.pdfFile], files.pdfFilename || pdfFilename(record), { type: 'application/pdf' });
+      await shareFilesOrDownload([file], 'PET Digital NR-33 — PDF', `PDF da ${record.payload?.fields?.petNumero || record.recordId}.`);
+    } catch (err) { if (err.name !== 'AbortError') alert('Não foi possível compartilhar o PDF: ' + err.message); }
+    finally { if (button) { button.disabled = false; button.textContent = original || 'Compartilhar PDF'; } }
   }
 
   /**
@@ -2292,7 +2487,9 @@
       fields: serializeForm(),
       people: collectPeople()
     };
-    localStorage.setItem(STORAGE_DRAFT, JSON.stringify(draft));
+    const key = currentDraftKey();
+    if (!key) return;
+    localStorage.setItem(key, JSON.stringify(draft));
   }
 
   /**
@@ -2312,11 +2509,14 @@
    * ignora com aviso no console.
    */
   function loadDraft() {
-    const raw = localStorage.getItem(STORAGE_DRAFT);
+    const key = currentDraftKey();
+    if (!key) return false;
+    const raw = localStorage.getItem(key);
     if (!raw) return false;
     try {
       const draft = JSON.parse(raw);
       restoreForm(draft.fields || {});
+      checklistItems.forEach((_, idx) => updateNaJustificationVisibility(String(idx + 1).padStart(2, '0')));
       if (Array.isArray(draft.people) && draft.people.length) {
         people = draft.people.map((p, idx) => ({ id: crypto.randomUUID ? crypto.randomUUID() : 'p-' + idx, ...p }));
         reindexPeople();
@@ -2370,16 +2570,50 @@
   }
 
   /**
+   * Reduz um registro concluído antes de colocá-lo no localStorage.
+   * O quê: evita duplicar fotos, assinaturas e todo o dossiê em um armazenamento pequeno.
+   * Como: registros já aceitos guardam apenas metadados necessários para a lista e para
+   * localizar os arquivos exatos no IndexedDB; tentativas pendentes preservam o conteúdo
+   * completo, pois ainda precisam ser reenviadas com a mesma idempotência.
+   * Quando: toda gravação/atualização do histórico local.
+   */
+  function recordForLocalStorage(record) {
+    if (!record?.serverRegistration || record?.pendingOfficialRegistration) return record;
+    return {
+      recordType: record.recordType,
+      recordId: record.recordId,
+      idempotencyKey: record.idempotencyKey,
+      payload: {
+        schema: record.payload?.schema,
+        proofStandard: record.payload?.proofStandard,
+        issuedBy: record.payload?.issuedBy,
+        fields: record.payload?.fields || {}
+      },
+      integrity: {
+        payloadHashSha256: record.integrity?.payloadHashSha256,
+        finalizedAt: record.integrity?.finalizedAt,
+        latestPdfProofHashSha256: record.integrity?.latestPdfProofHashSha256
+      },
+      output: record.output,
+      serverRegistration: record.serverRegistration,
+      pendingOfficialRegistration: false
+    };
+  }
+
+  /**
    * Salva uma PET finalizada no histórico local.
    * Ativação: finalização da PET.
    * O que faz: coloca o novo registro no início da lista e mantém no máximo 200 registros
    * no localStorage para evitar crescimento indefinido.
    */
   function saveRecord(record) {
-    const records = getRecords();
-    records.unshift(record);
+    const storedRecord = recordForLocalStorage(record);
+    const records = getRecords().filter(r => r.recordId !== record.recordId);
+    records.unshift(storedRecord);
     const limited = records.slice(0, 200);
-    localStorage.setItem(STORAGE_RECORDS, JSON.stringify(limited));
+    const key = currentRecordsKey();
+    if (!key) return;
+    localStorage.setItem(key, JSON.stringify(limited));
   }
 
   /**
@@ -2388,11 +2622,14 @@
    * O que faz: procura pelo recordId, substitui o registro, ou insere no início se não achar.
    */
   function updateStoredRecord(record) {
+    const storedRecord = recordForLocalStorage(record);
     const records = getRecords();
     const idx = records.findIndex(r => r.recordId === record.recordId);
-    if (idx >= 0) records[idx] = record;
-    else records.unshift(record);
-    localStorage.setItem(STORAGE_RECORDS, JSON.stringify(records.slice(0, 200)));
+    if (idx >= 0) records[idx] = storedRecord;
+    else records.unshift(storedRecord);
+    const key = currentRecordsKey();
+    if (!key) return;
+    localStorage.setItem(key, JSON.stringify(records.slice(0, 200)));
   }
 
   /**
@@ -2401,7 +2638,9 @@
    * O que faz: interpreta o JSON do localStorage e devolve array vazio em caso de erro.
    */
   function getRecords() {
-    try { return JSON.parse(localStorage.getItem(STORAGE_RECORDS) || '[]'); }
+    const key = currentRecordsKey();
+    if (!key) return [];
+    try { return JSON.parse(localStorage.getItem(key) || '[]'); }
     catch { return []; }
   }
 
@@ -2425,11 +2664,11 @@
       Situação: ${r.serverRegistration ? 'registrado no sistema' : 'pendente de registro no sistema'}
       <details class="advanced-details"><summary>Detalhes técnicos</summary><small class="record-hash">Código: ${escapeHtml(r.integrity?.payloadHashSha256 || '')}</small></details></div>
       <div class="actions">
-        <button type="button" class="small secondary" data-record-action="print" data-index="${idx}">PDF</button>
+        <button type="button" class="small secondary" data-record-action="print" data-index="${idx}">Abrir PDF</button>
         <button type="button" class="small secondary" data-record-action="sharePdf" data-index="${idx}">Compartilhar PDF</button>
         <button type="button" class="small secondary" data-record-action="export" data-index="${idx}">Comprovante</button>
         <button type="button" class="small secondary" data-record-action="shareJson" data-index="${idx}">Compartilhar comprovante</button>
-        <button type="button" class="small ghost" data-record-action="registerServer" data-index="${idx}">Registrar no sistema</button>
+        ${r.pendingOfficialRegistration && r.output?.pdfHashSha256 ? `<button type="button" class="small ghost" data-record-action="registerServer" data-index="${idx}">Repetir registro pendente</button>` : ''}
         <button type="button" class="small danger ghost" data-record-action="delete" data-index="${idx}">Excluir local</button>
       </div>
     </div>`).join('');
@@ -2441,7 +2680,7 @@
       if (btn.dataset.recordAction === 'print') {
         finalizedRecord = rec;
         showTab('formTab');
-        await printRecordWithProof(rec, btn);
+        await openOfficialPdf(rec, btn);
       }
       if (btn.dataset.recordAction === 'sharePdf') {
         finalizedRecord = rec;
@@ -2450,82 +2689,77 @@
       if (btn.dataset.recordAction === 'export') {
         finalizedRecord = rec;
         const ready = await ensureRecordReadyForOutput(rec, 'salvar o comprovante técnico');
-        if (ready) downloadJson(rec, jsonFilename(rec));
+        if (ready) { const files = await readOfficialFiles(rec); downloadBlob(new Blob([files.jsonText], { type: 'application/json' }), files.jsonFilename || jsonFilename(rec)); }
       }
       if (btn.dataset.recordAction === 'shareJson') await shareJsonRecord(rec, btn);
-      if (btn.dataset.recordAction === 'registerServer') await registerRecordOnServer(rec);
+      if (btn.dataset.recordAction === 'registerServer') await retryPendingRecordRegistration(rec, btn);
       if (btn.dataset.recordAction === 'delete') {
         if (!confirm('Excluir este registro apenas deste dispositivo?')) return;
         const updated = getRecords();
         updated.splice(Number(btn.dataset.index), 1);
-        localStorage.setItem(STORAGE_RECORDS, JSON.stringify(updated));
+        const key = currentRecordsKey();
+        if (key) localStorage.setItem(key, JSON.stringify(updated));
+        await deleteOfficialFiles(rec.recordId);
         renderRecords();
       }
     };
   }
 
   /**
-   * Valida um comprovante técnico importado pelo usuário.
-   * Ativação: seleção de arquivo na aba 'Validar'.
-   * O que faz: recalcula o hash do payload, verifica a assinatura da PET e também valida
-   * cada prova de PDF existente, exibindo o resultado na tela.
+   * Valida simultaneamente o PDF e o comprovante JSON, além de consultar o registro exato no Worker.
+   * Sem os dois arquivos, a validação oficial não é concluída.
    */
-  async function verifyFile(event) {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  async function verifyFiles() {
+    const jsonFile = $('#verifyJsonFile')?.files?.[0];
+    const pdfFile = $('#verifyPdfFile')?.files?.[0];
     const result = $('#verifyResult');
+    if (!jsonFile || !pdfFile) {
+      result.className = 'validation-box warn';
+      result.textContent = 'Selecione o PDF oficial e o comprovante técnico JSON correspondentes.';
+      return;
+    }
     try {
-      const text = await file.text();
+      const state = currentUser();
+      if (!['admin','gestor','verificador'].includes(state?.role)) throw new Error('Seu perfil não possui acesso à validação oficial.');
+      const text = await jsonFile.text();
+      const jsonHash = await sha256Hex(text);
+      const pdfHash = await sha256BlobHex(pdfFile);
       const record = JSON.parse(text);
-      if (!record.payload || !record.integrity) throw new Error('Arquivo não parece ser um dossiê PET Digital válido.');
+      if (!record.payload || !record.integrity || !record.fileIntegrity) throw new Error('Arquivo não é um comprovante oficial v1.1.4 completo.');
+      if (pdfHash !== record.fileIntegrity.pdfSha256) throw new Error('O PDF selecionado não corresponde ao hash gravado no comprovante.');
 
       const standardCheck = validateSupportedProofStandard(record.payload.proofStandard, 'PET');
-      const standardOk = standardCheck.errors.length === 0;
       const recalculated = await sha256Hex(record.payload);
       const hashMatches = recalculated === record.integrity.payloadHashSha256;
-      const signatureOk = standardOk && await verifySignature(recalculated, record.integrity.supervisorCryptographicSignature);
-
-      const proofLines = [];
+      const signatureOk = standardCheck.errors.length === 0 && await verifySignature(recalculated, record.integrity.supervisorCryptographicSignature);
       const proofs = record.integrity.pdfGenerationProofs || [];
+      if (!proofs.length) throw new Error('Comprovante sem prova de geração do PDF.');
       let allProofsOk = true;
-      for (const [idx, proof] of proofs.entries()) {
-        const proofStandardCheck = validateSupportedProofStandard(proof.proofStandard || proof, `Prova PDF ${idx + 1}`);
+      for (const proof of proofs) {
         const proofHash = await sha256Hex(proofHashInput(proof));
-        const proofHashOk = proofHash === proof.pdfProofHashSha256;
-        const proofSignatureOk = proofStandardCheck.errors.length === 0 && await verifySignature(proofHash, proof.cryptographicSignature);
-        allProofsOk = allProofsOk && proofHashOk && proofSignatureOk && proofStandardCheck.errors.length === 0;
-        proofLines.push(`\nProva PDF ${idx + 1}:`);
-        proofLines.push(`  Perfil: ${proof.validationProfile || proof.proofStandard?.validationProfile || '-'}`);
-        proofLines.push(`  Data/hora: ${formatDateTime(proof.generatedAt)}`);
-        proofLines.push(`  IP: ${proof.publicIp || 'não obtido'}`);
-        proofLines.push(`  Geolocalização: ${proof.geolocation?.available ? `${proof.geolocation.latitude}, ${proof.geolocation.longitude} ± ${Math.round(proof.geolocation.accuracyMeters || 0)} m` : (proof.geolocation?.error || 'não obtida')}`);
-        proofLines.push(`  Hash informado: ${proof.pdfProofHashSha256}`);
-        proofLines.push(`  Hash recalculado: ${proofHash}`);
-        proofLines.push(`  Hash confere: ${proofHashOk ? 'SIM' : 'NÃO'}`);
-        proofLines.push(`  Assinatura da prova confere: ${proofSignatureOk ? 'SIM' : 'NÃO'}`);
-        if (proofStandardCheck.errors.length) proofLines.push(`  Padrão incompatível: ${proofStandardCheck.errors.join(' | ')}`);
-        if (proofStandardCheck.warnings.length) proofLines.push(`  Avisos: ${proofStandardCheck.warnings.join(' | ')}`);
+        allProofsOk = allProofsOk && proofHash === proof.pdfProofHashSha256 && await verifySignature(proofHash, proof.cryptographicSignature);
       }
-      const allOk = standardOk && hashMatches && signatureOk && allProofsOk;
+      const localOk = standardCheck.errors.length === 0 && hashMatches && signatureOk && allProofsOk;
+      const server = await apiFetch('/validate-document', { method: 'POST', body: {
+        // Os arquivos são enviados somente durante a validação para o Worker recalcular
+        // os hashes de forma independente. O servidor não os armazena no D1.
+        pdfBase64: await blobToBase64(pdfFile),
+        jsonText: text
+      }});
+      const allOk = localOk && server.valid === true;
       result.className = 'validation-box ' + (allOk ? 'ok' : 'bad');
-      const technicalText = `Registro: ${record.recordId || '-'}\n` +
-        `Perfil de validação: ${record.payload.proofStandard?.validationProfile || '-'}\n` +
-        `Normalização: ${record.payload.proofStandard?.canonicalizationAlgorithm || CANONICALIZATION_ALGORITHM}\n` +
-        `Algoritmo: ${record.payload.proofStandard?.hashAlgorithm || HASH_ALGORITHM} / ${record.payload.proofStandard?.signatureAlgorithm || SIGNATURE_ALGORITHM}\n` +
-        (standardCheck.errors.length ? `Padrão incompatível: ${standardCheck.errors.join(' | ')}\n` : '') +
-        (standardCheck.warnings.length ? `Avisos: ${standardCheck.warnings.join(' | ')}\n` : '') +
-        `Código informado: ${record.integrity.payloadHashSha256}\n` +
-        `Código recalculado: ${recalculated}\n` +
-        `Código confere: ${hashMatches ? 'SIM' : 'NÃO'}\n` +
-        `Assinatura técnica confere: ${signatureOk ? 'SIM' : 'NÃO'}\n` +
-        `Finalizado em: ${formatDateTime(record.integrity.finalizedAt)}` +
-        (proofs.length ? `\n${proofLines.join('\n')}` : '\n\nSem prova de geração de PDF registrada no comprovante.');
-      result.innerHTML = `<strong>${allOk ? 'Comprovante íntegro e assinatura técnica válida.' : 'Falha de validação.'}</strong><br>Registro: ${escapeHtml(record.recordId || '-')}<br>Finalizado em: ${formatDateTime(record.integrity.finalizedAt)}<details class="advanced-details"><summary>Detalhes técnicos</summary><pre>${escapeHtml(technicalText)}</pre></details>`;
+      const technicalText = `Hash do PDF: ${pdfHash}
+Hash do JSON: ${jsonHash}
+Hash do payload: ${recalculated}
+Integridade local: ${localOk ? 'OK' : 'FALHA'}
+Registro exato no servidor: ${server.found ? 'ENCONTRADO' : 'NÃO ENCONTRADO'}
+Chave autorizada na emissão: ${server.keyAuthorizedAtRegistration ? 'SIM' : 'NÃO'}
+Assinaturas confirmadas no servidor: ${server.signaturesValid ? 'SIM' : 'NÃO'}
+Emissor: ${server.issuer ? `${server.issuer.name} (${server.issuer.matricula})` : 'NÃO CONFIRMADO'}`;
+      result.innerHTML = `<strong>${allOk ? 'Documento válido: PDF, comprovante, emissor e dispositivo confirmados.' : 'Documento não validado.'}</strong><br>${escapeHtml(server.message || server.reason || '')}<details class="advanced-details"><summary>Detalhes técnicos</summary><pre>${escapeHtml(technicalText)}</pre></details>`;
     } catch (err) {
       result.className = 'validation-box bad';
-      result.textContent = 'Não foi possível validar: ' + err.message;
-    } finally {
-      event.target.value = '';
+      result.textContent = 'Não foi possível validar oficialmente: ' + err.message;
     }
   }
 
@@ -2575,11 +2809,6 @@
 
   /** Retorna o nome sugerido para o comprovante técnico da PET. */
   function jsonFilename(record) { return `${recordFileStem(record)}_dossie.json`; }
-
-  /** Cria um File JSON em memória para compartilhamento nativo. */
-  function createJsonFile(record) {
-    return new File([JSON.stringify(record, null, 2)], jsonFilename(record), { type: 'application/json' });
-  }
 
   /**
    * Força o download de um objeto como arquivo JSON.
@@ -2731,7 +2960,7 @@
     renderPeople();
     bindEvents();
     setDefaultDateTime();
-    loadDraft();
+    purgeLegacySharedStorage();
     updateKeyStatus();
     loadAuthState();
     renderAuthState();

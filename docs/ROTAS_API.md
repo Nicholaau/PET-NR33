@@ -1,35 +1,64 @@
-# Rotas da API v1.1.3
+# Rotas da API v1.1.4
 
-Principais rotas do Worker:
+Base: `https://pet-digital-api.nicholas-dmae.workers.dev`
 
-```text
-GET  /health
-GET  /db-test
-POST /setup/admin
-POST /auth/login
-POST /auth/logout
-GET  /auth/me
-POST /users
-GET  /users
-PATCH /users/:id/status
-POST /devices/register
-GET  /devices
-POST /devices/:id/approve
-POST /devices/:id/revoke
-POST /pet-records
-GET  /pet-records/:numero_pet
-POST /validate
-GET  /audit
-```
+## Públicas
 
-A v1.1.3 mantém a mesma API da v1.1.0, com ajuste no fluxo do frontend e compatibilidade do PBKDF2 no Worker.
+- `GET /`
+- `GET /health`
+- `GET /db-test`
+- `POST /setup/admin` - somente instalação inicial.
+- `POST /auth/login`
 
+## Sessão autenticada
 
-## Gestão de usuários v1.1.3
+- `GET /auth/me`
+- `POST /auth/logout`
+- `POST /auth/change-password`
 
-- `PATCH /users/:id` — edita cadastro/perfil/situação conforme hierarquia.
-- `POST /users/:id/reset-password` — define senha temporária e revoga sessões.
-- `DELETE /users/:id` — exclui logicamente o acesso, preservando histórico.
-- `POST /auth/change-password` — usuário altera a própria senha.
+## Usuários - admin/gestor conforme hierarquia
 
-A exclusão é lógica para não romper referências de PET, auditoria, dispositivos e sessões.
+- `GET /users`
+- `POST /users`
+- `PATCH /users/:id`
+- `PATCH /users/:id/status`
+- `POST /users/:id/reset-password`
+- `DELETE /users/:id`
+
+## Dispositivos
+
+- `POST /devices/register`
+- `GET /devices`
+- `POST /devices/:id/approve`
+- `POST /devices/:id/revoke`
+
+## PET
+
+- `POST /pet-records`
+  - requer usuário autenticado e dispositivo ativo;
+  - recebe payload, assinaturas, PDF Base64 e JSON exato apenas durante a requisição;
+  - recalcula hashes e aplica regras de segurança;
+  - usa `idempotencyKey`;
+  - não grava os arquivos.
+
+- `GET /pet-records/:numeroOuHash`
+  - admin, gestor ou verificador.
+
+- `POST /validate`
+  - consulta simples por hash;
+  - admin, gestor ou verificador.
+
+- `POST /validate-document`
+  - validação oficial do conjunto PDF + JSON;
+  - exige número, hashes reais, emissor, matrícula e código do dispositivo;
+  - consulta o registro exato no D1;
+  - admin, gestor ou verificador.
+
+## Auditoria
+
+- `GET /audit?limit=50`
+  - admin ou gestor.
+
+## Respostas e cache
+
+As respostas do Worker incluem `Cache-Control: no-store, private, max-age=0`. Conflitos de número/idempotência/conteúdo retornam `409`.

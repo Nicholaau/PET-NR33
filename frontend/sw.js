@@ -1,28 +1,17 @@
 /**
- * Service Worker do PET-Digital NR-33.
+ * Service Worker do PET-Digital NR-33 v1.1.4.
  *
- * O quê: permite que o aplicativo abra mais rapidamente e funcione mesmo com internet instável.
- * Como: guarda em cache os arquivos principais do app e remove caches antigos em atualizações.
- * Quando: o navegador instala este arquivo após o primeiro acesso ao Cloudflare Pages.
+ * O quê: mantém offline somente os arquivos estáticos necessários para abrir a interface.
+ * Como: utiliza uma lista fechada de arquivos do próprio Pages e ignora integralmente API,
+ * autenticação, IP, sessão, respostas com Authorization e qualquer origem externa.
+ * Quando: é instalado/atualizado pelo navegador ao acessar o aplicativo publicado.
  *
- * Atenção: em produção, mudanças no cache devem ser feitas com cuidado para não prender o usuário
- * em versão antiga. Por isso o nome do cache inclui a versão.
+ * Correção de segurança v1.1.4:
+ * - versões anteriores armazenavam qualquer requisição GET, inclusive respostas autenticadas;
+ * - esta versão apaga imediatamente os caches antigos e nunca grava respostas da API.
  */
 
-/*
- * Service Worker do PET Digital NR-33.
- *
- * Função geral:
- * - Permite que o aplicativo funcione offline depois do primeiro carregamento.
- * - Mantém em cache o “app shell”: HTML, CSS, JavaScript e manifesto.
- * - Controla atualização: quando uma nova versão do SW aparece, o app mostra o banner
- *   e só aplica a atualização quando o usuário confirma, evitando perder preenchimento.
- */
-
-// Nome do cache. Cache versionado para controlar atualização entre versões publicadas.
-const CACHE_NAME = 'pet-digital-cache-v1.1.3';
-
-// Arquivos essenciais para abrir o aplicativo mesmo sem internet.
+const CACHE_NAME = 'pet-digital-static-v1.1.4';
 const APP_SHELL = [
   './',
   './index.html',
@@ -32,49 +21,82 @@ const APP_SHELL = [
   './logo-dmae-2026.png'
 ];
 
-/*
- * Evento install.
- * Quando ativa: quando o navegador instala este Service Worker pela primeira vez
- * ou detecta alteração no arquivo sw.js.
- * O que faz: abre o cache versionado e grava os arquivos principais do app.
- */
+// Caminhos que podem ser armazenados. Qualquer caminho não listado sempre segue direto para a rede.
+const STATIC_PATHS = new Set([
+  '/',
+  '/index.html',
+  '/styles.css',
+  '/app.js',
+  '/manifest.json',
+  '/logo-dmae-2026.png'
+]);
+
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)));
+  event.waitUntil((async () => {
+    // Exclui caches legados já no install para reduzir a janela de exposição da versão antiga.
+    const keys = await caches.keys();
+    await Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key)));
+    const cache = await caches.open(CACHE_NAME);
+    await cache.addAll(APP_SHELL);
+    await self.skipWaiting();
+  })());
 });
 
-/*
- * Evento activate.
- * Quando ativa: quando este Service Worker passa a controlar o app.
- * O que faz: remove caches antigos que tenham nome diferente de CACHE_NAME.
- */
 self.addEventListener('activate', event => {
-  event.waitUntil(
-    caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))))
-  );
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key)));
+    await self.clients.claim();
+  })());
 });
 
-/*
- * Evento message.
- * Quando ativa: quando o app envia mensagem para o Service Worker.
- * O que faz: ao receber SKIP_WAITING, aplica imediatamente a nova versão que estava aguardando.
- */
 self.addEventListener('message', event => {
   if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
-/*
- * Evento fetch.
- * Quando ativa: em cada requisição GET feita pelo app.
- * O que faz: tenta responder pelo cache; se não houver cache, busca na rede e salva uma cópia.
- * Se a rede falhar, tenta devolver o index.html para manter o app abrindo offline.
- */
 self.addEventListener('fetch', event => {
-  if (event.request.method !== 'GET') return;
-  event.respondWith(
-    caches.match(event.request).then(cached => cached || fetch(event.request).then(response => {
-      const clone = response.clone();
-      caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+  const request = event.request;
+
+  // Nunca interfere em POST/PATCH/DELETE, nem em requisições autenticadas.
+  if (request.method !== 'GET' || request.headers.has('Authorization')) return;
+
+  const url = new URL(request.url);
+
+  // Nunca intercepta Worker/API, CDN, consulta de IP ou qualquer origem externa.
+  if (url.origin !== self.location.origin) return;
+
+  const isNavigation = request.mode === 'navigate';
+  const isAllowedStatic = STATIC_PATHS.has(url.pathname);
+  if (!isNavigation && !isAllowedStatic) return;
+
+  if (isNavigation) {
+    // Navegação é network-first: prioriza versão atual; usa index offline apenas se a rede falhar.
+    event.respondWith((async () => {
+      try {
+        const response = await fetch(request, { cache: 'no-store' });
+        if (response.ok) {
+          const cache = await caches.open(CACHE_NAME);
+          await cache.put('./index.html', response.clone());
+        }
+        return response;
+      } catch {
+        return (await caches.match('./index.html')) || Response.error();
+      }
+    })());
+    return;
+  }
+
+  // Arquivos estáticos: network-first para receber correções rapidamente; cache apenas como fallback offline.
+  event.respondWith((async () => {
+    try {
+      const response = await fetch(request, { cache: 'no-store' });
+      if (response.ok && response.type === 'basic') {
+        const cache = await caches.open(CACHE_NAME);
+        await cache.put(request, response.clone());
+      }
       return response;
-    }).catch(() => caches.match('./index.html')))
-  );
+    } catch {
+      return (await caches.match(request)) || Response.error();
+    }
+  })());
 });

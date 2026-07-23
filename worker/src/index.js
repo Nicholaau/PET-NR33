@@ -1,5 +1,5 @@
 /**
- * PET-Digital NR-33 v1.1.3 — Worker/API Cloudflare comentado.
+ * PET-Digital NR-33 v1.1.4 — Worker/API Cloudflare comentado.
  *
  * O que é este arquivo?
  * - É a API backend do PET-Digital. Ele roda no Cloudflare Worker.
@@ -40,6 +40,11 @@ const SESSION_TTL_DEFAULT = 28800;
 const CHALLENGE_TTL_DEFAULT = 300;
 // Expressão que valida SHA-256 em hexadecimal: 64 caracteres de 0-9/a-f.
 const HASH_RE = /^[a-f0-9]{64}$/i;
+// Padrões criptográficos aceitos. O perfil antigo permanece apenas para validar registros v1.1.3.
+const ACCEPTED_VALIDATION_PROFILES = new Set(['PET-DIGITAL-NR33-v1', 'PET-DIGITAL-NR33-PROOF/v1']);
+const CANONICALIZATION_ALGORITHM = 'JSON_CANONICAL_STABLE_STRINGIFY_V1';
+const HASH_ALGORITHM = 'SHA-256';
+const SIGNATURE_ALGORITHM = 'ECDSA-P256-SHA256';
 
 export default {
   /**
@@ -115,6 +120,7 @@ async function route(request, env, url) {
   if (request.method === 'POST' && path === '/pet-records') return createPetRecord(request, env);
   if (request.method === 'GET' && path.startsWith('/pet-records/')) return getPetRecord(request, env, decodeURIComponent(path.split('/')[2] || ''));
   if (request.method === 'POST' && path === '/validate') return validateHash(request, env);
+  if (request.method === 'POST' && path === '/validate-document') return validateDocument(request, env);
   if (request.method === 'GET' && path === '/audit') return listAudit(request, env, url);
 
   return json({ ok: false, error: 'Rota não encontrada.', path }, 404);
@@ -452,76 +458,187 @@ async function revokeDevice(request, env, deviceId) {
 }
 
 /**
- * O quê: registra no D1 o rastro técnico de uma PET finalizada.
- * Como: valida hash, confere se a chave pública está ativa, verifica a assinatura ECDSA e grava apenas hashes/metadados.
- * Quando: após finalizar a PET no frontend e gerar o PDF/JSON localmente.
+ * O quê: registra no D1 o rastro técnico completo de uma PET oficial, sem armazenar os arquivos.
+ * Como: recebe temporariamente PDF + comprovante, recalcula os hashes, aplica as regras de segurança,
+ * confere a chave autorizada e valida as assinaturas extraídas do JSON antes de gravar metadados.
+ * Quando: somente depois que o frontend já gerou os bytes finais do PDF e do comprovante técnico.
  */
 async function createPetRecord(request, env) {
   const auth = await requireAuth(request, env);
   if (auth.user.mustChangePassword) throw httpError(403, 'Altere a senha temporária antes de registrar uma PET oficial.');
   const body = await readJson(request);
-  const payloadHash = clean(body.payloadHash).toLowerCase();
-  if (!HASH_RE.test(payloadHash)) throw httpError(400, 'Hash do payload inválido.');
-  assertText(body.numeroPet, 'Número da PET obrigatório.');
-  assertText(body.petSignatureB64, 'Assinatura criptográfica obrigatória.');
-  const publicKeyHash = clean(body.publicKeyHash).toLowerCase();
-  if (!HASH_RE.test(publicKeyHash)) throw httpError(400, 'Hash da chave pública inválido.');
+
+  const idempotencyKey = clean(body.idempotencyKey);
+  if (!idempotencyKey || idempotencyKey.length < 16 || idempotencyKey.length > 100) {
+    throw httpError(400, 'Chave de idempotência inválida.');
+  }
+  assertText(body.pdfBase64, 'Conteúdo do PDF obrigatório.');
+  if (typeof body.jsonText !== 'string' || !body.jsonText.trim()) throw httpError(400, 'Conteúdo do comprovante técnico obrigatório.');
+
+  // Os arquivos chegam apenas durante esta requisição. O Worker calcula os hashes dos
+  // bytes reais e extrai do JSON todos os dados de assinatura; o D1 não recebe os arquivos.
+  let pdfBytes;
+  try { pdfBytes = base64ToBytes(body.pdfBase64); }
+  catch { throw httpError(400, 'O conteúdo Base64 do PDF é inválido.'); }
+  if (!pdfBytes.length || pdfBytes.length > 20 * 1024 * 1024) throw httpError(413, 'O PDF está vazio ou excede o limite de 20 MB.');
+  const jsonBytesLength = new TextEncoder().encode(body.jsonText).length;
+  if (jsonBytesLength > 20 * 1024 * 1024) throw httpError(413, 'O comprovante técnico excede o limite de 20 MB.');
+
+  const pdfHash = await sha256HexBytes(pdfBytes);
+  const jsonHash = await sha256Hex(body.jsonText);
+  let dossier;
+  try { dossier = JSON.parse(body.jsonText); }
+  catch { throw httpError(400, 'O comprovante técnico não contém JSON válido.'); }
+  if (!dossier?.payload || !dossier?.integrity || !dossier?.fileIntegrity) throw httpError(400, 'Estrutura do comprovante técnico inválida.');
+
+  const payload = dossier.payload;
+  const integrity = dossier.integrity;
+  assertSupportedProofStandard(payload.proofStandard, 'PET_PAYLOAD');
+  const numeroPet = clean(payload?.fields?.petNumero);
+  assertText(numeroPet, 'Número da PET ausente no comprovante.');
+  const payloadHash = await sha256HexCanonical(payload);
+  if (clean(integrity.payloadHashSha256)?.toLowerCase() !== payloadHash) throw httpError(400, 'O conteúdo da PET não corresponde ao hash declarado no comprovante.');
+  if (clean(dossier.fileIntegrity.pdfSha256)?.toLowerCase() !== pdfHash) throw httpError(400, 'O comprovante técnico não corresponde ao PDF recebido.');
+  const expectedRecordId = payloadHash.slice(0, 16).toUpperCase();
+  if (clean(dossier.recordId) && clean(dossier.recordId) !== expectedRecordId) throw httpError(400, 'Código de conferência do comprovante inválido.');
+
+  const issuer = payload?.issuedBy || {};
+  if (clean(issuer.userId) !== auth.user.id || clean(issuer.matricula) !== auth.user.matricula) {
+    throw httpError(403, 'O usuário autenticado não corresponde ao emissor gravado no comprovante.');
+  }
+
+  const petSignature = integrity.supervisorCryptographicSignature || {};
+  const petSignatureB64 = clean(petSignature.signatureBase64);
+  assertText(petSignatureB64, 'Assinatura técnica da PET ausente.');
+  const publicKeyHash = requiredHash(petSignature.publicKeyHash, 'Código do dispositivo inválido.');
+
+  const proofs = Array.isArray(integrity.pdfGenerationProofs) ? integrity.pdfGenerationProofs : [];
+  const proof = proofs[proofs.length - 1];
+  if (!proof || typeof proof !== 'object') throw httpError(400, 'Prova de geração do PDF obrigatória.');
+  assertSupportedProofStandard(proof.proofStandard, 'PDF_GENERATION_PROOF');
+  const pdfProofHash = await sha256HexCanonical(pdfProofHashInput(proof));
+  if (clean(proof.pdfProofHashSha256)?.toLowerCase() !== pdfProofHash) throw httpError(400, 'A prova de geração do PDF não corresponde ao hash declarado.');
+  if (clean(integrity.latestPdfProofHashSha256)?.toLowerCase() !== pdfProofHash) throw httpError(400, 'O comprovante não referencia corretamente a última prova de PDF.');
+  if (clean(proof.payloadHashSha256)?.toLowerCase() !== payloadHash || clean(proof.petNumero) !== numeroPet) {
+    throw httpError(400, 'A prova de geração do PDF não está vinculada a esta PET.');
+  }
+  const pdfProofSignatureB64 = clean(proof.cryptographicSignature?.signatureBase64);
+  assertText(pdfProofSignatureB64, 'Assinatura da prova de geração do PDF ausente.');
+  if (clean(proof.cryptographicSignature?.publicKeyHash)?.toLowerCase() !== publicKeyHash) {
+    throw httpError(400, 'A PET e a prova do PDF não foram assinadas pelo mesmo dispositivo.');
+  }
+
+  // Repete no servidor todas as regras impeditivas. O frontend é apenas uma camada de UX.
+  const safety = await validatePetPayloadSafety(payload);
+  if (!safety.ok) {
+    await audit(env, auth.user.id, 'pet_record_create', 'pet_records', null, 'blocked', request, { reason: 'safety_validation_failed', numeroPet, errors: safety.errors });
+    throw httpError(422, 'PET recusada pelas regras de segurança: ' + safety.errors.join(' | '));
+  }
 
   const device = await env.DB.prepare(`SELECT * FROM device_keys WHERE user_id = ? AND public_key_hash = ? AND status = 'active'`).bind(auth.user.id, publicKeyHash).first();
-  if (!device) throw httpError(403, 'Chave pública não está ativa para este usuário. Registre e aprove o dispositivo antes de registrar PETs no D1.');
+  if (!device) throw httpError(403, 'O dispositivo não está autorizado para este usuário.');
 
-  const publicKeyJwk = JSON.parse(device.public_key_jwk);
-  const signatureOk = await verifyEcdsaSignature(publicKeyJwk, payloadHash, body.petSignatureB64);
+  let publicKeyJwk;
+  try { publicKeyJwk = JSON.parse(device.public_key_jwk); }
+  catch { throw httpError(500, 'A chave pública registrada no servidor está inválida.'); }
+  const signatureOk = await verifyEcdsaSignature(publicKeyJwk, payloadHash, petSignatureB64);
   if (!signatureOk) {
     await audit(env, auth.user.id, 'pet_record_create', 'pet_records', null, 'blocked', request, { reason: 'signature_invalid', payloadHash, publicKeyHash });
-    throw httpError(400, 'Assinatura criptográfica do payload não confere com a chave pública ativa.');
+    throw httpError(400, 'A assinatura técnica da PET não confere com o dispositivo autorizado.');
+  }
+  const proofSignatureOk = await verifyEcdsaSignature(publicKeyJwk, pdfProofHash, pdfProofSignatureB64);
+  if (!proofSignatureOk) throw httpError(400, 'A assinatura da prova de geração do PDF não confere.');
+
+  // Idempotência e conflito: somente o mesmo número, conteúdo, arquivos e usuário podem
+  // ser tratados como repetição bem-sucedida. Toda divergência retorna HTTP 409.
+  const byIdempotency = await env.DB.prepare('SELECT * FROM pet_records WHERE idempotency_key = ?').bind(idempotencyKey).first();
+  if (byIdempotency) {
+    const same = petRecordMatches(byIdempotency, numeroPet, payloadHash, pdfHash, jsonHash, auth.user.id);
+    if (!same) throw httpError(409, 'A chave de idempotência já foi usada com conteúdo diferente.');
+    return json({ ok: true, petRecord: publicPetRecord(byIdempotency), alreadyExists: true, idempotentReplay: true });
   }
 
-  const existing = await env.DB.prepare('SELECT id, numero_pet, payload_hash, status, server_received_at FROM pet_records WHERE payload_hash = ? OR numero_pet = ?').bind(payloadHash, clean(body.numeroPet)).first();
-  if (existing) return json({ ok: true, petRecord: existing, alreadyExists: true });
+  const byNumber = await env.DB.prepare('SELECT * FROM pet_records WHERE numero_pet = ?').bind(numeroPet).first();
+  if (byNumber) {
+    const same = petRecordMatches(byNumber, numeroPet, payloadHash, pdfHash, jsonHash, auth.user.id);
+    if (same) return json({ ok: true, petRecord: publicPetRecord(byNumber), alreadyExists: true });
+    throw httpError(409, 'Conflito: este número de PET já pertence a outro conteúdo.');
+  }
+
+  const byHash = await env.DB.prepare('SELECT * FROM pet_records WHERE payload_hash = ?').bind(payloadHash).first();
+  if (byHash) {
+    const same = petRecordMatches(byHash, numeroPet, payloadHash, pdfHash, jsonHash, auth.user.id);
+    if (same) return json({ ok: true, petRecord: publicPetRecord(byHash), alreadyExists: true });
+    throw httpError(409, 'Conflito: o conteúdo informado já está vinculado a outro número, usuário ou arquivo.');
+  }
+
+  const geo = proof.geolocation && proof.geolocation.available ? proof.geolocation : null;
+  if (geo) {
+    const lat = Number(geo.latitude);
+    const lng = Number(geo.longitude);
+    const accuracy = Number(geo.accuracyMeters ?? geo.accuracy ?? 0);
+    if (!Number.isFinite(lat) || lat < -90 || lat > 90 || !Number.isFinite(lng) || lng < -180 || lng > 180 || !Number.isFinite(accuracy) || accuracy < 0) {
+      throw httpError(400, 'Geolocalização da prova inválida.');
+    }
+  }
 
   const id = crypto.randomUUID();
-  const geo = body.geo && body.geo.available ? body.geo : null;
-  await env.DB.prepare(`INSERT INTO pet_records (
-    id, numero_pet, created_by_user_id, signing_key_id, validation_profile, schema_version,
-    payload_hash, pdf_hash, json_hash, pdf_proof_hash, pet_signature_b64, pdf_proof_signature_b64,
-    client_generated_at, server_received_at, client_timezone, ip_address, user_agent, geo_lat, geo_lng, geo_accuracy_m, status, notes
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?)`)
-    .bind(
-      id,
-      clean(body.numeroPet),
-      auth.user.id,
-      device.id,
-      clean(body.validationProfile || env.VALIDATION_PROFILE || 'PET-DIGITAL-NR33-v1'),
-      clean(body.schemaVersion || ''),
-      payloadHash,
-      nullableHash(body.pdfHash),
-      nullableHash(body.jsonHash),
-      nullableHash(body.pdfProofHash),
-      clean(body.petSignatureB64),
-      clean(body.pdfProofSignatureB64 || null),
-      clean(body.clientGeneratedAt || null),
-      nowIso(),
-      clean(body.clientTimezone || null),
-      clientIp(request),
-      request.headers.get('user-agent') || '',
-      geo ? Number(geo.latitude) : null,
-      geo ? Number(geo.longitude) : null,
-      geo ? Number(geo.accuracyMeters || geo.accuracy || 0) : null,
-      clean(body.notes || null)
-    ).run();
+  const now = nowIso();
+  const participantRows = Array.isArray(payload.professionals) ? payload.professionals : [];
+  const validationProfile = clean(payload.proofStandard?.validationProfile || env.VALIDATION_PROFILE || 'PET-DIGITAL-NR33-v1');
+  const schemaVersion = clean(payload.schema || '');
+  const statements = [
+    env.DB.prepare(`INSERT INTO pet_records (
+      id, numero_pet, created_by_user_id, signing_key_id, validation_profile, schema_version,
+      payload_hash, pdf_hash, json_hash, pdf_proof_hash, pet_signature_b64, pdf_proof_signature_b64,
+      client_generated_at, server_received_at, client_timezone, ip_address, user_agent,
+      geo_lat, geo_lng, geo_accuracy_m, status, notes, idempotency_key
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?)`)
+      .bind(
+        id, numeroPet, auth.user.id, device.id, validationProfile, schemaVersion,
+        payloadHash, pdfHash, jsonHash, pdfProofHash, petSignatureB64, pdfProofSignatureB64,
+        clean(integrity.finalizedAt || proof.generatedAt || null), now,
+        clean(proof.timezone || null), clientIp(request), request.headers.get('user-agent') || '',
+        geo ? Number(geo.latitude) : null, geo ? Number(geo.longitude) : null,
+        geo ? Number(geo.accuracyMeters ?? geo.accuracy ?? 0) : null,
+        null, idempotencyKey
+      ),
+    env.DB.prepare('UPDATE device_keys SET last_used_at = ? WHERE id = ?').bind(now, device.id)
+  ];
 
-  const participants = Array.isArray(body.participants) ? body.participants : [];
-  for (const p of participants) {
-    await env.DB.prepare(`INSERT INTO pet_participant_hashes (id, pet_record_id, participant_role, name, matricula, photo_hash, signature_image_hash, signed_at_client)
+  for (const p of participantRows) {
+    statements.push(env.DB.prepare(`INSERT INTO pet_participant_hashes (id, pet_record_id, participant_role, name, matricula, photo_hash, signature_image_hash, signed_at_client)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(crypto.randomUUID(), id, clean(p.participantRole || p.type || 'entrante'), clean(p.name), clean(p.matricula), nullableHash(p.photoHash), nullableHash(p.signatureImageHash), clean(p.signedAtClient || null)).run();
+      .bind(crypto.randomUUID(), id, clean(p.type), clean(p.nome), clean(p.matricula),
+        requiredHash(p.photoHash, 'Hash de foto de participante inválido.'),
+        requiredHash(p.signatureHash, 'Hash de assinatura de participante inválido.'), clean(p.signedAt || null)));
   }
 
-  await env.DB.prepare('UPDATE device_keys SET last_used_at = ? WHERE id = ?').bind(nowIso(), device.id).run();
-  await audit(env, auth.user.id, 'pet_record_create', 'pet_records', id, 'success', request, { numeroPet: clean(body.numeroPet), payloadHash, publicKeyHash });
-  const record = await env.DB.prepare('SELECT id, numero_pet, payload_hash, status, server_received_at FROM pet_records WHERE id = ?').bind(id).first();
-  return json({ ok: true, petRecord: record }, 201);
+  try {
+    await env.DB.batch(statements);
+  } catch (error) {
+    // Protege também contra duas requisições simultâneas que passem pelas consultas acima
+    // antes de a primeira concluir o INSERT. Após a restrição única disparar, o Worker
+    // consulta novamente e só transforma o caso em repetição quando todo o conjunto coincide.
+    const concurrentByIdempotency = await env.DB.prepare('SELECT * FROM pet_records WHERE idempotency_key = ?').bind(idempotencyKey).first();
+    if (concurrentByIdempotency) {
+      if (petRecordMatches(concurrentByIdempotency, numeroPet, payloadHash, pdfHash, jsonHash, auth.user.id)) {
+        return json({ ok: true, petRecord: publicPetRecord(concurrentByIdempotency), alreadyExists: true, idempotentReplay: true });
+      }
+      throw httpError(409, 'Conflito simultâneo: a chave de idempotência foi usada com conteúdo diferente.');
+    }
+    const concurrentByNumber = await env.DB.prepare('SELECT * FROM pet_records WHERE numero_pet = ?').bind(numeroPet).first();
+    if (concurrentByNumber) {
+      if (petRecordMatches(concurrentByNumber, numeroPet, payloadHash, pdfHash, jsonHash, auth.user.id)) {
+        return json({ ok: true, petRecord: publicPetRecord(concurrentByNumber), alreadyExists: true });
+      }
+      throw httpError(409, 'Conflito simultâneo: o número da PET já foi registrado com outro conteúdo.');
+    }
+    throw error;
+  }
+  await audit(env, auth.user.id, 'pet_record_create', 'pet_records', id, 'success', request, { numeroPet, payloadHash, pdfHash, jsonHash, publicKeyHash, idempotencyKey });
+  const record = await env.DB.prepare('SELECT * FROM pet_records WHERE id = ?').bind(id).first();
+  return json({ ok: true, petRecord: publicPetRecord(record) }, 201);
 }
 
 /**
@@ -539,18 +656,119 @@ async function getPetRecord(request, env, numeroPet) {
 }
 
 /**
- * O quê: verifica se um hash de payload foi registrado no D1.
- * Como: exige perfil verificador/gestor/admin e procura em `pet_records`.
- * Quando: conferência rápida para saber se o dossiê recebido corresponde a um registro aceito.
+ * O quê: consulta rápida por hash do payload.
+ * Como: exige perfil de verificação e retorna apenas se o hash foi registrado no D1.
+ * Quando: consulta manual na área Sistema.
  */
 async function validateHash(request, env) {
-  await requireRole(request, env, ['admin', 'gestor', 'verificador']);
+  const auth = await requireRole(request, env, ['admin', 'gestor', 'verificador']);
   const body = await readJson(request);
-  const payloadHash = clean(body.payloadHash).toLowerCase();
-  if (!HASH_RE.test(payloadHash)) throw httpError(400, 'Hash inválido.');
-  const record = await env.DB.prepare(`SELECT pr.id, pr.numero_pet, pr.payload_hash, pr.status, pr.server_received_at, pr.client_generated_at, u.name AS created_by_name, u.matricula AS created_by_matricula, dk.public_key_hash
-    FROM pet_records pr LEFT JOIN app_users u ON u.id = pr.created_by_user_id LEFT JOIN device_keys dk ON dk.id = pr.signing_key_id WHERE pr.payload_hash = ?`).bind(payloadHash).first();
+  const payloadHash = requiredHash(body.payloadHash, 'Hash inválido.');
+  const record = await env.DB.prepare(`SELECT pr.id, pr.numero_pet, pr.payload_hash, pr.pdf_hash, pr.json_hash, pr.status, pr.server_received_at, pr.client_generated_at,
+      u.id AS created_by_user_id, u.name AS created_by_name, u.matricula AS created_by_matricula, dk.public_key_hash
+    FROM pet_records pr JOIN app_users u ON u.id = pr.created_by_user_id JOIN device_keys dk ON dk.id = pr.signing_key_id
+    WHERE pr.payload_hash = ?`).bind(payloadHash).first();
   return json({ ok: true, found: !!record, record: record || null });
+}
+
+/**
+ * O quê: valida um comprovante técnico importado sem confiar na chave contida no próprio arquivo.
+ * Como: exige coincidência simultânea de número, hash do payload, hash real do JSON, hash do PDF,
+ * emissor e dispositivo previamente autorizado no registro do servidor.
+ * Quando: a aba Validar envia os dados recalculados do arquivo recebido.
+ */
+async function validateDocument(request, env) {
+  const auth = await requireRole(request, env, ['admin', 'gestor', 'verificador']);
+  const body = await readJson(request);
+  assertText(body.pdfBase64, 'Conteúdo do PDF obrigatório para validação oficial.');
+  if (typeof body.jsonText !== 'string' || !body.jsonText.trim()) throw httpError(400, 'Comprovante técnico obrigatório para validação oficial.');
+
+  // O Worker recalcula os hashes dos arquivos recebidos. Assim, a validação não depende
+  // de valores informados pelo frontend nem da chave pública incorporada ao próprio JSON.
+  let pdfBytes;
+  try { pdfBytes = base64ToBytes(body.pdfBase64); }
+  catch { throw httpError(400, 'O conteúdo Base64 do PDF é inválido.'); }
+  if (!pdfBytes.length || pdfBytes.length > 20 * 1024 * 1024) throw httpError(413, 'O PDF está vazio ou excede 20 MB.');
+  const jsonBytesLength = new TextEncoder().encode(body.jsonText).length;
+  if (jsonBytesLength > 20 * 1024 * 1024) throw httpError(413, 'O comprovante técnico excede 20 MB.');
+
+  const pdfHash = await sha256HexBytes(pdfBytes);
+  const jsonHash = await sha256Hex(body.jsonText);
+  let dossier;
+  try { dossier = JSON.parse(body.jsonText); }
+  catch { throw httpError(400, 'O comprovante técnico não contém JSON válido.'); }
+  if (!dossier?.payload || !dossier?.integrity || !dossier?.fileIntegrity) throw httpError(400, 'Estrutura do comprovante técnico inválida.');
+  assertSupportedProofStandard(dossier.payload.proofStandard, 'PET_PAYLOAD');
+
+  const numeroPet = clean(dossier.payload?.fields?.petNumero);
+  assertText(numeroPet, 'Número da PET ausente no comprovante.');
+  const payloadHash = await sha256HexCanonical(dossier.payload);
+  if (clean(dossier.integrity?.payloadHashSha256)?.toLowerCase() !== payloadHash) throw httpError(400, 'O conteúdo do comprovante foi alterado: hash do payload não confere.');
+  if (clean(dossier.fileIntegrity?.pdfSha256)?.toLowerCase() !== pdfHash) throw httpError(400, 'O PDF selecionado não corresponde ao comprovante técnico.');
+
+  const petSignature = dossier.integrity?.supervisorCryptographicSignature || {};
+  const publicKeyHash = requiredHash(petSignature.publicKeyHash, 'Código do dispositivo ausente ou inválido no comprovante.');
+  assertText(petSignature.signatureBase64, 'Assinatura técnica da PET ausente no comprovante.');
+  const issuerUserId = clean(dossier.payload?.issuedBy?.userId);
+  const issuerMatricula = clean(dossier.payload?.issuedBy?.matricula);
+  assertText(issuerUserId, 'Identificação do emissor ausente no comprovante.');
+  assertText(issuerMatricula, 'Matrícula do emissor ausente no comprovante.');
+
+  const proofs = Array.isArray(dossier.integrity?.pdfGenerationProofs) ? dossier.integrity.pdfGenerationProofs : [];
+  const proof = proofs[proofs.length - 1];
+  if (!proof) throw httpError(400, 'Comprovante sem prova de geração do PDF.');
+  assertSupportedProofStandard(proof.proofStandard, 'PDF_GENERATION_PROOF');
+  const proofHash = await sha256HexCanonical(pdfProofHashInput(proof));
+  if (clean(proof.pdfProofHashSha256)?.toLowerCase() !== proofHash || clean(proof.payloadHashSha256)?.toLowerCase() !== payloadHash || clean(proof.petNumero) !== numeroPet) {
+    throw httpError(400, 'A prova de geração do PDF não corresponde à PET recebida.');
+  }
+  const proofSignatureB64 = clean(proof.cryptographicSignature?.signatureBase64);
+  assertText(proofSignatureB64, 'Assinatura da prova de geração ausente.');
+
+  const record = await env.DB.prepare(`SELECT pr.*, u.name AS created_by_name, u.matricula AS created_by_matricula,
+      dk.public_key_hash, dk.public_key_jwk, dk.approved_at, dk.revoked_at, dk.status AS current_key_status
+    FROM pet_records pr
+    JOIN app_users u ON u.id = pr.created_by_user_id
+    JOIN device_keys dk ON dk.id = pr.signing_key_id
+    WHERE pr.numero_pet = ? AND pr.payload_hash = ? AND pr.pdf_hash = ? AND pr.json_hash = ?
+      AND pr.pdf_proof_hash = ? AND pr.created_by_user_id = ? AND u.matricula = ? AND dk.public_key_hash = ?`)
+    .bind(numeroPet, payloadHash, pdfHash, jsonHash, proofHash, issuerUserId, issuerMatricula, publicKeyHash).first();
+
+  if (!record) {
+    await audit(env, auth.user.id, 'document_validate', 'pet_records', null, 'failure', request, { numeroPet, payloadHash, pdfHash, jsonHash, publicKeyHash, reason: 'exact_match_not_found' });
+    return json({ ok: true, valid: false, found: false, reason: 'Os arquivos não correspondem a um registro aceito pelo servidor.' });
+  }
+
+  let storedPublicKey;
+  try { storedPublicKey = JSON.parse(record.public_key_jwk); }
+  catch { throw httpError(500, 'A chave pública registrada no servidor está inválida.'); }
+  const petSignatureOk = await verifyEcdsaSignature(storedPublicKey, payloadHash, petSignature.signatureBase64);
+  const proofSignatureOk = await verifyEcdsaSignature(storedPublicKey, proofHash, proofSignatureB64);
+  const storedSignaturesMatch = clean(record.pet_signature_b64) === clean(petSignature.signatureBase64)
+    && clean(record.pdf_proof_signature_b64) === proofSignatureB64;
+
+  const approvedAt = record.approved_at ? Date.parse(record.approved_at) : NaN;
+  const receivedAt = Date.parse(record.server_received_at);
+  const revokedAt = record.revoked_at ? Date.parse(record.revoked_at) : NaN;
+  const keyAuthorizedAtRegistration = Number.isFinite(approvedAt) && approvedAt <= receivedAt && (!Number.isFinite(revokedAt) || revokedAt >= receivedAt);
+  const valid = record.status === 'accepted' && keyAuthorizedAtRegistration && petSignatureOk && proofSignatureOk && storedSignaturesMatch;
+  await audit(env, auth.user.id, 'document_validate', 'pet_records', record.id, valid ? 'success' : 'failure', request, {
+    numeroPet, keyAuthorizedAtRegistration, petSignatureOk, proofSignatureOk, storedSignaturesMatch, currentKeyStatus: record.current_key_status
+  });
+  return json({
+    ok: true,
+    valid,
+    found: true,
+    keyAuthorizedAtRegistration,
+    signaturesValid: petSignatureOk && proofSignatureOk && storedSignaturesMatch,
+    currentKeyStatus: record.current_key_status,
+    record: publicPetRecord(record),
+    issuer: { userId: record.created_by_user_id, name: record.created_by_name, matricula: record.created_by_matricula },
+    calculated: { payloadHash, pdfHash, jsonHash, proofHash },
+    message: valid
+      ? 'PDF e comprovante confirmados no servidor, com emissor, dispositivo e assinaturas válidos.'
+      : 'Registro encontrado, mas uma das verificações de autorização ou assinatura falhou.'
+  });
 }
 
 /**
@@ -690,6 +908,154 @@ async function verifyEcdsaSignature(publicKeyJwk, messageHashHex, signatureBase6
   }
 }
 
+/** Regras de N/A compartilhadas com o frontend. */
+const MAX_NA_ITEMS = 5;
+const NA_FORBIDDEN_ITEMS = new Set(['01','02','03','05','06','08','10','11','12','14','16','17','18','22']);
+
+/**
+ * O quê: valida no servidor as condições mínimas de segurança contidas no payload assinado.
+ * Como: verifica checklist, justificativas de N/A, medições, detector, participantes e coerência do supervisor.
+ * Quando: antes de qualquer INSERT em pet_records.
+ */
+/**
+ * O quê: impede que o próprio arquivo escolha algoritmos arbitrários.
+ * Como: aceita somente os perfis conhecidos e os algoritmos fixados no código do Worker.
+ * Quando: registro e validação oficial de qualquer comprovante.
+ */
+function assertSupportedProofStandard(standard, expectedScope) {
+  if (!standard || typeof standard !== 'object') throw httpError(400, 'Padrão técnico de validação ausente.');
+  if (!ACCEPTED_VALIDATION_PROFILES.has(clean(standard.validationProfile))) throw httpError(400, 'Perfil técnico de validação não suportado.');
+  if (clean(standard.scope) !== expectedScope) throw httpError(400, 'Escopo do padrão técnico incompatível.');
+  if (clean(standard.canonicalizationAlgorithm) !== CANONICALIZATION_ALGORITHM) throw httpError(400, 'Regra de normalização JSON não suportada.');
+  if (clean(standard.hashAlgorithm) !== HASH_ALGORITHM) throw httpError(400, 'Algoritmo de hash não suportado.');
+  if (clean(standard.signatureAlgorithm) !== SIGNATURE_ALGORITHM) throw httpError(400, 'Algoritmo de assinatura não suportado.');
+}
+
+async function validatePetPayloadSafety(payload) {
+  const errors = [];
+  const fields = payload?.fields || {};
+  const checklist = Array.isArray(payload?.checklist) ? payload.checklist : [];
+  const professionals = Array.isArray(payload?.professionals) ? payload.professionals : [];
+
+  if (checklist.length !== 22) errors.push('O checklist deve conter exatamente 22 itens.');
+  const seen = new Set();
+  let naCount = 0;
+  for (const c of checklist) {
+    const number = String(c?.number || '').padStart(2, '0');
+    if (seen.has(number)) errors.push(`Item ${number} duplicado no checklist.`);
+    seen.add(number);
+    if (!['S','N','NA'].includes(c?.answer)) errors.push(`Item ${number} sem resposta válida.`);
+    if (c?.answer === 'NA') {
+      naCount++;
+      if (NA_FORBIDDEN_ITEMS.has(number)) errors.push(`Item ${number} é crítico e não aceita N/A.`);
+      if (clean(c.justification || '').length < 10) errors.push(`Item ${number} marcado N/A sem justificativa suficiente.`);
+    }
+  }
+  if (naCount > MAX_NA_ITEMS) errors.push(`Quantidade de itens N/A acima do limite (${MAX_NA_ITEMS}).`);
+
+  const answer = n => checklist.find(c => String(c.number).padStart(2, '0') === n)?.answer;
+  const negativeBlocking = checklist.filter(c => c.answer === 'N' && !['12','15','20'].includes(String(c.number).padStart(2, '0')));
+  if (negativeBlocking.length) errors.push('Há item de controle impeditivo marcado como NÃO.');
+  if (answer('12') !== 'N') errors.push('O item 12 deve confirmar que a atmosfera NÃO está IPVS.');
+  if (answer('15') === 'S' && answer('19') !== 'S') errors.push('Ar mandado necessário sem linha de ar instalada e operando.');
+
+  if (answer('10') !== 'S') errors.push('A calibração atualizada do detector deve ser confirmada no item 10.');
+  if (!clean(fields.detectorId)) errors.push('Identificador do detector obrigatório.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(clean(fields.detectorCalibracao) || '')) errors.push('Data de calibração/validade do detector obrigatória.');
+  const referenceDate = clean(fields.data) || nowIso().slice(0, 10);
+  if (clean(fields.detectorCalibracao) && clean(fields.detectorCalibracao) < referenceDate) errors.push('Detector com calibração/validade vencida na data da PET.');
+
+  const gasErrors = validateGasFields(fields);
+  errors.push(...gasErrors);
+
+  const counts = { entrante: 0, vigia: 0, supervisor: 0 };
+  const matriculas = new Set();
+  for (const p of professionals) {
+    if (counts[p?.type] != null) counts[p.type]++;
+    if (!clean(p?.nome)) errors.push('Participante sem nome.');
+    const mat = clean(p?.matricula)?.toLowerCase();
+    if (!mat) errors.push('Participante sem matrícula.');
+    else if (matriculas.has(mat)) errors.push(`Matrícula repetida: ${mat}.`);
+    else matriculas.add(mat);
+    if (!String(p?.photoDataUrl || '').startsWith('data:image/')) errors.push(`${clean(p?.role) || 'Participante'} sem foto válida.`);
+    if (!String(p?.signatureDataUrl || '').startsWith('data:image/')) errors.push(`${clean(p?.role) || 'Participante'} sem assinatura válida.`);
+    if (!HASH_RE.test(clean(p?.photoHash) || '')) errors.push(`${clean(p?.role) || 'Participante'} com hash de foto inválido.`);
+    if (!HASH_RE.test(clean(p?.signatureHash) || '')) errors.push(`${clean(p?.role) || 'Participante'} com hash de assinatura inválido.`);
+    if (p?.photoDataUrl && p?.photoHash && await sha256Hex(p.photoDataUrl) !== String(p.photoHash).toLowerCase()) errors.push(`${clean(p?.role) || 'Participante'}: foto não corresponde ao hash.`);
+    if (p?.signatureDataUrl && p?.signatureHash && await sha256Hex(p.signatureDataUrl) !== String(p.signatureHash).toLowerCase()) errors.push(`${clean(p?.role) || 'Participante'}: assinatura não corresponde ao hash.`);
+  }
+  if (!counts.entrante) errors.push('É obrigatório pelo menos um entrante.');
+  if (!counts.vigia) errors.push('É obrigatório pelo menos um vigia.');
+  if (counts.supervisor !== 1) errors.push('É obrigatório exatamente um supervisor.');
+  const supervisor = professionals.find(p => p.type === 'supervisor');
+  if (clean(fields.supervisorEntrada)?.toLowerCase() !== clean(supervisor?.nome)?.toLowerCase()) errors.push('Supervisor da identificação divergente do supervisor assinante.');
+
+  return { ok: errors.length === 0, errors };
+}
+
+/** Valida valores numéricos das medições, inclusive a proibição de negativos. */
+function validateGasFields(fields) {
+  const errors = [];
+  const number = (name, required) => {
+    const raw = clean(fields[name]);
+    if (!raw) { if (required) errors.push(`${name} obrigatório.`); return null; }
+    const value = Number(String(raw).replace(',', '.'));
+    if (!Number.isFinite(value)) { errors.push(`${name} inválido.`); return null; }
+    if (value < 0) errors.push(`${name} não pode ser negativo.`);
+    return value;
+  };
+  for (const [prefix, required] of [['gas_inicial', true], ['gas_ventilacao', false]]) {
+    const hasAny = required || ['hora','o2','lie','h2s','co','obs'].some(k => clean(fields[`${prefix}_${k}`]));
+    if (!hasAny) continue;
+    if (!clean(fields[`${prefix}_hora`])) errors.push(`${prefix}_hora obrigatório.`);
+    const o2 = number(`${prefix}_o2`, true);
+    const lie = number(`${prefix}_lie`, true);
+    const h2s = number(`${prefix}_h2s`, true);
+    const co = number(`${prefix}_co`, true);
+    if (o2 != null && !(o2 > 19.5 && o2 < 23)) errors.push(`${prefix}: O2 fora do intervalo seguro.`);
+    if (lie != null && !(lie < 10)) errors.push(`${prefix}: LIE fora do limite seguro.`);
+    if (h2s != null && !(h2s < 5)) errors.push(`${prefix}: H2S fora do limite seguro.`);
+    if (co != null && !(co < 25)) errors.push(`${prefix}: CO fora do limite seguro.`);
+  }
+  return errors;
+}
+
+/** Remove campos calculados da prova antes de recalcular o hash canônico. */
+function pdfProofHashInput(proof) {
+  const clone = structuredClone(proof);
+  delete clone.pdfProofHashSha256;
+  delete clone.cryptographicSignature;
+  return clone;
+}
+
+/** Confere se um registro existente representa exatamente o mesmo conjunto oficial. */
+function petRecordMatches(row, numeroPet, payloadHash, pdfHash, jsonHash, userId) {
+  return Boolean(row)
+    && row.numero_pet === numeroPet
+    && row.payload_hash === payloadHash
+    && row.pdf_hash === pdfHash
+    && row.json_hash === jsonHash
+    && row.created_by_user_id === userId;
+}
+
+/** Converte uma linha do D1 para a resposta pública padronizada. */
+function publicPetRecord(row) {
+  return {
+    id: row.id,
+    numero_pet: row.numero_pet,
+    payload_hash: row.payload_hash,
+    pdf_hash: row.pdf_hash,
+    json_hash: row.json_hash,
+    pdf_proof_hash: row.pdf_proof_hash,
+    status: row.status,
+    server_received_at: row.server_received_at,
+    client_generated_at: row.client_generated_at,
+    created_by_user_id: row.created_by_user_id,
+    public_key_hash: row.public_key_hash || null,
+    idempotency_key: row.idempotency_key || null
+  };
+}
+
 /**
  * O quê: grava trilha de auditoria no D1.
  * Como: insere ação, usuário, entidade, resultado, IP, navegador e detalhes JSON.
@@ -732,6 +1098,9 @@ function buildCorsHeaders(request, env) {
 function withCors(response, corsHeaders) {
   const headers = new Headers(response.headers);
   for (const [k, v] of Object.entries(corsHeaders)) headers.set(k, v);
+  headers.set('Cache-Control', 'no-store, private, max-age=0');
+  headers.set('Pragma', 'no-cache');
+  headers.set('X-Content-Type-Options', 'nosniff');
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -741,7 +1110,16 @@ function withCors(response, corsHeaders) {
  * Quando: usada por praticamente todas as rotas.
  */
 function json(data, status = 200, extraHeaders = {}) {
-  return new Response(JSON.stringify(data, null, 2), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', ...extraHeaders } });
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store, private, max-age=0',
+      'Pragma': 'no-cache',
+      'X-Content-Type-Options': 'nosniff',
+      ...extraHeaders
+    }
+  });
 }
 
 /**
@@ -773,6 +1151,8 @@ function assertText(value, message) { if (!clean(value)) throw httpError(400, me
 function assertPassword(value) { if (String(value || '').length < 8) throw httpError(400, 'A senha deve ter pelo menos 8 caracteres.'); }
 /** O quê: valida hash opcional; Como: aceita vazio como null e exige SHA-256 hex quando preenchido; Quando: registro de PET e arquivos. */
 function nullableHash(value) { const v = clean(value); if (!v) return null; if (!HASH_RE.test(v)) throw httpError(400, 'Hash inválido.'); return v.toLowerCase(); }
+/** Exige um SHA-256 hexadecimal. */
+function requiredHash(value, message = 'Hash obrigatório ou inválido.') { const v = clean(value); if (!v || !HASH_RE.test(v)) throw httpError(400, message); return v.toLowerCase(); }
 /** O quê: remove campos sensíveis do usuário; Como: devolve só dados públicos; Quando: respostas de login/cadastro/me. */
 function publicUser(u) { return { id: u.id, name: u.name, matricula: u.matricula, email: u.email || null, role: u.role, unit: u.unit || null, status: u.status || u.user_status || null, mustChangePassword: u.mustChangePassword ?? Boolean(Number(u.must_change_password || 0)), createdAt: u.created_at || null, updatedAt: u.updated_at || null, lastLoginAt: u.last_login_at || null }; }
 /** O quê: identifica IP do cliente; Como: lê CF-Connecting-IP ou x-forwarded-for; Quando: auditoria e registro de PET. */
@@ -796,6 +1176,12 @@ function randomToken(bytes = 32) {
 async function sha256Hex(text) {
   const data = new TextEncoder().encode(String(text));
   const hash = await crypto.subtle.digest('SHA-256', data);
+  return bytesToHex(new Uint8Array(hash));
+}
+
+/** O quê: calcula SHA-256 dos bytes reais de um arquivo; Como: recebe Uint8Array diretamente; Quando: validação transitória do PDF enviado. */
+async function sha256HexBytes(bytes) {
+  const hash = await crypto.subtle.digest('SHA-256', bytes);
   return bytesToHex(new Uint8Array(hash));
 }
 
