@@ -1,4 +1,4 @@
-# Rotas da API v1.1.4
+# Rotas da API v1.1.5
 
 Base: `https://pet-digital-api.nicholas-dmae.workers.dev`
 
@@ -7,16 +7,17 @@ Base: `https://pet-digital-api.nicholas-dmae.workers.dev`
 - `GET /`
 - `GET /health`
 - `GET /db-test`
-- `POST /setup/admin` - somente instalação inicial.
-- `POST /auth/login`
+- `POST /setup/admin`
+- `POST /auth/login` — sujeito a limite por matrícula e IP.
 
 ## Sessão autenticada
 
 - `GET /auth/me`
+- `GET /client-context` — hora/IP observados pelo Worker para a prova do PDF.
 - `POST /auth/logout`
 - `POST /auth/change-password`
 
-## Usuários - admin/gestor conforme hierarquia
+## Usuários
 
 - `GET /users`
 - `POST /users`
@@ -25,6 +26,8 @@ Base: `https://pet-digital-api.nicholas-dmae.workers.dev`
 - `POST /users/:id/reset-password`
 - `DELETE /users/:id`
 
+Admin administra todos. Gestor administra somente operacional/verificador.
+
 ## Dispositivos
 
 - `POST /devices/register`
@@ -32,33 +35,31 @@ Base: `https://pet-digital-api.nicholas-dmae.workers.dev`
 - `POST /devices/:id/approve`
 - `POST /devices/:id/revoke`
 
+Admin administra todos. Gestor lista e administra somente operacional/verificador. O Worker repete a verificação no endpoint de alteração.
+
 ## PET
 
 - `POST /pet-records`
-  - requer usuário autenticado e dispositivo ativo;
-  - recebe payload, assinaturas, PDF Base64 e JSON exato apenas durante a requisição;
-  - recalcula hashes e aplica regras de segurança;
-  - usa `idempotencyKey`;
-  - não grava os arquivos.
-
+  - exige autenticação, dispositivo ativo e senha não temporária;
+  - aplica limites de corpo, arquivos, imagens e participantes;
+  - recalcula hashes e assinaturas;
+  - grava registro + participantes em `DB.batch()`;
+  - confere `participant_count`;
+  - não persiste PDF/JSON.
 - `GET /pet-records/:numeroOuHash`
-  - admin, gestor ou verificador.
-
 - `POST /validate`
-  - consulta simples por hash;
-  - admin, gestor ou verificador.
-
 - `POST /validate-document`
-  - validação oficial do conjunto PDF + JSON;
-  - exige número, hashes reais, emissor, matrícula e código do dispositivo;
-  - consulta o registro exato no D1;
-  - admin, gestor ou verificador.
 
 ## Auditoria
 
 - `GET /audit?limit=50`
-  - admin ou gestor.
 
-## Respostas e cache
+## Códigos relevantes
 
-As respostas do Worker incluem `Cache-Control: no-store, private, max-age=0`. Conflitos de número/idempotência/conteúdo retornam `409`.
+- `400`: dados inválidos;
+- `401`: credenciais/sessão inválidas;
+- `403`: perfil, chave ou dispositivo sem permissão;
+- `409`: conflito de número, conteúdo ou idempotência;
+- `413`: requisição/arquivo/equipe acima do limite;
+- `422`: regra de segurança da PET recusada;
+- `429`: tentativas de login temporariamente bloqueadas.

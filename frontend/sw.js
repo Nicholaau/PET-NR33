@@ -1,39 +1,43 @@
 /**
- * Service Worker do PET-Digital NR-33 v1.1.4.
+ * Service Worker do PET-Digital NR-33 v1.1.5.
  *
- * O quê: mantém offline somente os arquivos estáticos necessários para abrir a interface.
- * Como: utiliza uma lista fechada de arquivos do próprio Pages e ignora integralmente API,
- * autenticação, IP, sessão, respostas com Authorization e qualquer origem externa.
- * Quando: é instalado/atualizado pelo navegador ao acessar o aplicativo publicado.
+ * O quê: mantém offline somente os arquivos estáticos do próprio aplicativo.
+ * Como: usa uma lista fechada; nunca intercepta API, Authorization, CDN, sessão ou IP.
+ * Quando: instalado/atualizado ao acessar o Cloudflare Pages.
  *
- * Correção de segurança v1.1.4:
- * - versões anteriores armazenavam qualquer requisição GET, inclusive respostas autenticadas;
- * - esta versão apaga imediatamente os caches antigos e nunca grava respostas da API.
+ * v1.1.5:
+ * - apaga imediatamente caches anteriores;
+ * - atualiza a lista para os quatro módulos JavaScript;
+ * - não armazena bibliotecas externas nem respostas autenticadas.
  */
 
-const CACHE_NAME = 'pet-digital-static-v1.1.4';
+const CACHE_NAME = 'pet-digital-static-v1.1.5';
 const APP_SHELL = [
   './',
   './index.html',
   './styles.css',
-  './app.js',
+  './app-core.js',
+  './app-system.js',
+  './app-form.js',
+  './app-output.js',
   './manifest.json',
   './logo-dmae-2026.png'
 ];
 
-// Caminhos que podem ser armazenados. Qualquer caminho não listado sempre segue direto para a rede.
 const STATIC_PATHS = new Set([
   '/',
   '/index.html',
   '/styles.css',
-  '/app.js',
+  '/app-core.js',
+  '/app-system.js',
+  '/app-form.js',
+  '/app-output.js',
   '/manifest.json',
   '/logo-dmae-2026.png'
 ]);
 
 self.addEventListener('install', event => {
   event.waitUntil((async () => {
-    // Exclui caches legados já no install para reduzir a janela de exposição da versão antiga.
     const keys = await caches.keys();
     await Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key)));
     const cache = await caches.open(CACHE_NAME);
@@ -51,18 +55,14 @@ self.addEventListener('activate', event => {
 });
 
 self.addEventListener('message', event => {
-  if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
+  if (event.data?.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
 self.addEventListener('fetch', event => {
   const request = event.request;
-
-  // Nunca interfere em POST/PATCH/DELETE, nem em requisições autenticadas.
   if (request.method !== 'GET' || request.headers.has('Authorization')) return;
 
   const url = new URL(request.url);
-
-  // Nunca intercepta Worker/API, CDN, consulta de IP ou qualquer origem externa.
   if (url.origin !== self.location.origin) return;
 
   const isNavigation = request.mode === 'navigate';
@@ -70,7 +70,6 @@ self.addEventListener('fetch', event => {
   if (!isNavigation && !isAllowedStatic) return;
 
   if (isNavigation) {
-    // Navegação é network-first: prioriza versão atual; usa index offline apenas se a rede falhar.
     event.respondWith((async () => {
       try {
         const response = await fetch(request, { cache: 'no-store' });
@@ -86,7 +85,6 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Arquivos estáticos: network-first para receber correções rapidamente; cache apenas como fallback offline.
   event.respondWith((async () => {
     try {
       const response = await fetch(request, { cache: 'no-store' });

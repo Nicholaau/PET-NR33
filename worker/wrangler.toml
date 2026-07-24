@@ -17,3 +17,9 @@ SESSION_COOKIE_NAME = "pet_session"
 SESSION_TTL_SECONDS = "28800"
 CHALLENGE_TTL_SECONDS = "300"
 CORS_ALLOWED_ORIGIN = "https://pet-digital.pages.dev"
+
+# Opcionais: limites de login. Se não definidos, o Worker usa estes valores.
+LOGIN_WINDOW_SECONDS = "900"
+LOGIN_LOCK_SECONDS = "900"
+LOGIN_MAX_ACCOUNT = "5"
+LOGIN_MAX_IP = "20"

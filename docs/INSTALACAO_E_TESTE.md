@@ -1,115 +1,116 @@
-# Instalação e teste - PET-Digital v1.1.4
+# Instalação e teste — PET-Digital v1.1.5
 
-## 1. D1 - etapa obrigatória
+## 1. D1
 
-No console SQL do banco `pet_digital_db`, confira:
+Execute uma única vez:
+
+```text
+migrations/0004_hardening_v115.sql
+```
+
+Confirme:
 
 ```sql
+SELECT name FROM sqlite_master WHERE type='table' AND name='auth_rate_limits';
 PRAGMA table_info(pet_records);
 ```
 
-Se não existir `idempotency_key`, execute uma vez:
-
-```text
-migrations/0003_security_v114.sql
-```
-
-Depois confirme:
-
-```sql
-SELECT name FROM sqlite_master
-WHERE type = 'index' AND name IN (
-  'idx_pet_records_idempotency',
-  'idx_pet_records_exact_validation'
-);
-```
+A tabela deve existir e `pet_records` deve possuir `participant_count`.
 
 ## 2. Worker
 
-No `pet-digital-api`, substitua o código por:
+Substitua o código por:
 
 ```text
-worker-pet-digital-api-v1.1.4.js
+worker-pet-digital-api-v1.1.5.js
 ```
 
-Faça deploy e teste:
+ou `worker/src/index.js`, e faça deploy.
+
+Teste:
 
 ```text
 https://pet-digital-api.nicholas-dmae.workers.dev/health
 https://pet-digital-api.nicholas-dmae.workers.dev/db-test
 ```
 
-O `/health` deve indicar D1 e secrets configurados.
+Variáveis opcionais para alterar os limites de login:
+
+```text
+LOGIN_WINDOW_SECONDS = 900
+LOGIN_LOCK_SECONDS = 900
+LOGIN_MAX_ACCOUNT = 5
+LOGIN_MAX_IP = 20
+```
 
 ## 3. Pages
 
-Publique o conteúdo da pasta `frontend/` no projeto `pet-digital`.
-
-Abra:
+Publique toda a pasta `frontend/`, incluindo `_headers`. Abra:
 
 ```text
 https://pet-digital.pages.dev
 ```
 
-A v1.1.4 elimina caches antigos automaticamente. Em teste, feche abas antigas e recarregue a página uma vez.
+O cache esperado é `pet-digital-static-v1.1.5`.
 
-## 4. Testes de aceitação recomendados
+## 4. Testes de aceitação
 
-### Sessão/cache
+### Permissões de dispositivos
 
-1. Entre como usuário A.
-2. Abra Sistema e Registros.
-3. Saia.
-4. Entre como usuário B no mesmo navegador.
-5. Confirme que rascunhos/registros de A não aparecem e que o dispositivo de A não é apresentado como autorizado para B.
-6. No DevTools > Application > Cache Storage, confirme que só há `pet-digital-static-v1.1.4` e apenas arquivos estáticos.
+1. Entre como gestor.
+2. Confirme que só aparecem dispositivos de operacional/verificador.
+3. Tente chamar manualmente o endpoint de dispositivo de gestor/admin: deve retornar `403`.
+4. Entre como admin e confirme acesso a todos.
 
-### PET insegura
+### Limite de login
 
-Confirme que a finalização é bloqueada para:
+1. Use uma conta de teste e erre a senha cinco vezes.
+2. Confirme resposta `429` e mensagem de bloqueio.
+3. Confirme registro em `auth_rate_limits`.
+4. Após o período ou limpeza controlada do registro de teste, faça login correto.
 
-- valor negativo de gás;
-- todos os itens em N/A;
-- item crítico em N/A;
-- N/A sem justificativa;
-- matrículas repetidas;
-- supervisor divergente;
-- detector vencido;
-- assinatura/foto ausente.
+### Registro completo
 
-### Emissão e idempotência
+1. Emita PET com vários participantes.
+2. Confirme `participant_count` igual ao número de linhas em `pet_participant_hashes`.
+3. Valide PDF + comprovante e confirme `participantSetComplete: true`.
 
-1. Finalize uma PET válida.
-2. Durante o processamento, tente clicar novamente.
-3. Confirme que não é criado outro número.
-4. Após sucesso, confirme botão bloqueado.
-5. Para nova PET, use Limpar formulário.
+### Limites
 
-### Falha/repetição
+- tente adicionar mais de 15 entrantes, 4 vigias ou 20 participantes;
+- selecione foto maior que 12 MB;
+- envie requisição artificial acima dos limites do Worker;
+- confirme mensagens claras e ausência de registro incompleto.
 
-1. Interrompa a internet imediatamente antes do registro.
-2. Confirme a situação pendente.
-3. Restaure a internet e use Repetir registro pendente.
-4. Confirme que o mesmo número e a mesma tentativa são reutilizados.
+### Data local
 
-### Validação oficial
+Em um aparelho configurado para Uberlândia, teste próximo da meia-noite. A data sugerida deve ser o dia local, não o dia UTC.
 
-1. Receba PDF e JSON de uma PET registrada.
-2. Entre como verificador/gestor/admin.
-3. Selecione os dois arquivos.
-4. Confirme resultado válido.
-5. Altere um byte/campo do JSON e repita: deve falhar.
-6. Selecione outro PDF: deve falhar.
-7. Crie um JSON com chave própria não registrada: deve falhar na consulta ao servidor.
+### Login e formulário
 
-### Conflitos
+- pressione Enter no campo de senha;
+- percorra as seis etapas;
+- provoque erro em etapa anterior e clique Validar/Finalizar;
+- confirme que o app abre a etapa e desloca para o primeiro problema.
 
-Tente enviar o mesmo número com conteúdo diferente. A API deve responder `409`, nunca `ok:true`.
+### Acessibilidade
 
-## 5. Compatibilidade
+Com leitor de tela ou ferramenta automática, confirme nomes dos 12 campos de gases e cabeçalhos de linha/coluna.
 
-Registros anteriores que tenham `pdf_hash`, `json_hash` ou prova do PDF nulos não passam pela validação oficial exata. Faça os testes de aceitação com uma nova PET emitida integralmente na v1.1.4.
+### CSP/SRI/cache
 
-## 6. Aviso
+- confira os cabeçalhos de resposta do Pages;
+- confirme que os scripts da CDN apresentam `integrity`;
+- confirme que Cache Storage contém apenas os arquivos estáticos listados no `sw.js`;
+- confirme que `/auth/me`, `/users`, `/devices` e `/client-context` não são cacheados.
 
-O Worker recebe PDF e JSON de forma transitória para recalcular hashes, mas não os grava no D1. Verifique no ambiente real o limite de tamanho e a qualidade das fotos em celulares utilizados pela equipe.
+### Armazenamento local
+
+- confirme que `localStorage` não contém fotos/assinaturas de registros finalizados;
+- confirme no máximo 30 referências;
+- simule cota cheia e verifique o aviso visível;
+- confirme que uma PET já aceita no Worker não volta ao estado pendente apenas porque a cópia local falhou.
+
+## 5. Observação
+
+Use PETs fictícias até concluir a homologação do fluxo no ambiente real e nos celulares da equipe.

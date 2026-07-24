@@ -1,10 +1,11 @@
 <!doctype html>
-<!-- PET-Digital NR-33 v1.1.4 comentado: estrutura visual do app. O comportamento fica em app.js; a API fica no Worker. -->
+<!-- PET-Digital NR-33 v1.1.5 comentado: estrutura visual do app. O comportamento é dividido em quatro arquivos JavaScript; a API fica no Worker. -->
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#0b3a66" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://pet-digital-api.nicholas-dmae.workers.dev; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; worker-src 'self' blob:; manifest-src 'self'" />
   <title>PET Digital NR-33 — DMAE</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="stylesheet" href="styles.css" />
@@ -45,7 +46,7 @@
       <div id="authStatus" class="validation-box warn">Informe suas credenciais para acessar o sistema.</div>
 
       <div class="login-grid">
-        <section class="login-panel">
+        <form id="loginForm" class="login-panel">
           <h2>Entrar</h2>
           <label>Matrícula
             <input id="loginMatricula" autocomplete="username" placeholder="Matrícula" />
@@ -54,12 +55,12 @@
             <input id="loginPassword" type="password" autocomplete="current-password" placeholder="Senha" />
           </label>
           <div class="actions no-print">
-            <button type="button" id="loginBtn">Entrar no sistema</button>
+            <button type="submit" id="loginBtn">Entrar no sistema</button>
           </div>
           <p class="hint">Após o login, o formulário da PET e os registros salvos neste dispositivo serão liberados.</p>
-        </section>
+        </form>
 
-        <section class="login-panel setup-panel">
+        <form id="setupAdminForm" class="login-panel setup-panel">
           <details>
             <summary>Primeiro acesso / criar administrador</summary>
             <p class="hint">Use apenas na instalação inicial do sistema.</p>
@@ -79,10 +80,10 @@
               <input id="setupPassword" type="password" placeholder="Senha forte" />
             </label>
             <div class="actions no-print">
-              <button type="button" id="setupAdminBtn" class="secondary">Criar primeiro administrador</button>
+              <button type="submit" id="setupAdminBtn" class="secondary">Criar primeiro administrador</button>
             </div>
           </details>
-        </section>
+        </form>
       </div>
     </section>
   </main>
@@ -111,8 +112,26 @@
           </div>
         </section>
 
+        <nav class="form-wizard no-print" aria-label="Etapas do preenchimento">
+          <div class="form-progress-head"><strong id="formProgressLabel">Etapa 1 de 6: Identificação</strong><progress id="formProgressBar" max="6" value="1">1 de 6</progress></div>
+          <div id="formStepButtons" class="form-step-buttons">
+            <button type="button" data-form-step-target="1">1. Identificação</button>
+            <button type="button" data-form-step-target="2">2. Checklist</button>
+            <button type="button" data-form-step-target="3">3. Atmosfera</button>
+            <button type="button" data-form-step-target="4">4. Equipe</button>
+            <button type="button" data-form-step-target="5">5. Ciência</button>
+            <button type="button" data-form-step-target="6">6. Finalização</button>
+          </div>
+          <div class="form-step-nav">
+            <button type="button" id="formPrevBtn" class="ghost">Etapa anterior</button>
+            <button type="button" id="formNextBtn" class="secondary">Próxima etapa</button>
+          </div>
+        </nav>
+
+        <div id="storageNotice" class="validation-box warn hidden no-print" role="status" aria-live="polite"></div>
+
         <!-- Seção 1: dados gerais que serão coletados para o payload assinado. -->
-        <section class="card">
+        <section class="card" data-form-step="1">
           <h2>1. Identificação da PET</h2>
           <div class="grid cols-2">
             <label>Nome da unidade
@@ -163,8 +182,8 @@
           </div>
         </section>
 
-        <!-- Seção 2: checklist dinâmico renderizado pelo app.js a partir de checklistItems. -->
-        <section class="card">
+        <!-- Seção 2: checklist dinâmico renderizado pelo módulo de formulário a partir de checklistItems. -->
+        <section class="card" data-form-step="2">
           <h2>2. Itens a serem verificados antes da emissão da PET</h2>
           <p class="hint">A entrada não deve ser liberada quando houver campo obrigatório sem preenchimento ou resposta que impeça a entrada segura. A opção N/A é restrita aos itens não críticos, exige justificativa e possui limite automático.</p>
           <div class="table-wrap">
@@ -178,34 +197,34 @@
         </section>
 
         <!-- Seção 3: medições de atmosfera, usadas pela validação automática. -->
-        <section class="card">
+        <section class="card" data-form-step="3">
           <h2>3. Medições de gases perigosos</h2>
           <p class="hint">Critérios de liberação adotados no modelo: O₂ entre 19,5% e 23%; inflamável &lt; 10% LIE; H₂S &lt; 5 ppm; CO &lt; 25 ppm.</p>
           <div class="table-wrap gas-wrap">
             <table id="gasTable" class="gas-table">
               <thead>
                 <tr>
-                  <th>Teste</th><th>Hora</th><th>Oxigênio (%)</th><th>Inflamável (% LIE)</th><th>H₂S (ppm)</th><th>CO (ppm)</th><th>Obs.</th>
+                  <th scope="col">Teste</th><th scope="col">Hora</th><th scope="col">Oxigênio (%)</th><th scope="col">Inflamável (% LIE)</th><th scope="col">H₂S (ppm)</th><th scope="col">CO (ppm)</th><th scope="col">Obs.</th>
                 </tr>
               </thead>
               <tbody>
                 <tr data-gas-row="inicial">
-                  <td>1 — Teste inicial</td>
-                  <td><input type="time" name="gas_inicial_hora" required /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_inicial_o2" required /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_inicial_lie" required /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_inicial_h2s" required /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_inicial_co" required /></td>
-                  <td><input name="gas_inicial_obs" /></td>
+                  <th scope="row">1 — Teste inicial</th>
+                  <td><input type="time" name="gas_inicial_hora" aria-label="Teste inicial: hora" required /></td>
+                  <td><input type="number" min="0" step="0.1" name="gas_inicial_o2" aria-label="Teste inicial: oxigênio em porcentagem" required /></td>
+                  <td><input type="number" min="0" step="0.1" name="gas_inicial_lie" aria-label="Teste inicial: inflamável em porcentagem do LIE" required /></td>
+                  <td><input type="number" min="0" step="0.1" name="gas_inicial_h2s" aria-label="Teste inicial: H2S em ppm" required /></td>
+                  <td><input type="number" min="0" step="0.1" name="gas_inicial_co" aria-label="Teste inicial: CO em ppm" required /></td>
+                  <td><input name="gas_inicial_obs" aria-label="Teste inicial: observações" /></td>
                 </tr>
                 <tr data-gas-row="ventilacao">
-                  <td>2 — Após ventilação</td>
-                  <td><input type="time" name="gas_ventilacao_hora" /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_ventilacao_o2" /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_ventilacao_lie" /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_ventilacao_h2s" /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_ventilacao_co" /></td>
-                  <td><input name="gas_ventilacao_obs" /></td>
+                  <th scope="row">2 — Após ventilação</th>
+                  <td><input type="time" name="gas_ventilacao_hora" aria-label="Teste após ventilação: hora" /></td>
+                  <td><input type="number" min="0" step="0.1" name="gas_ventilacao_o2" aria-label="Teste após ventilação: oxigênio em porcentagem" /></td>
+                  <td><input type="number" min="0" step="0.1" name="gas_ventilacao_lie" aria-label="Teste após ventilação: inflamável em porcentagem do LIE" /></td>
+                  <td><input type="number" min="0" step="0.1" name="gas_ventilacao_h2s" aria-label="Teste após ventilação: H2S em ppm" /></td>
+                  <td><input type="number" min="0" step="0.1" name="gas_ventilacao_co" aria-label="Teste após ventilação: CO em ppm" /></td>
+                  <td><input name="gas_ventilacao_obs" aria-label="Teste após ventilação: observações" /></td>
                 </tr>
               </tbody>
             </table>
@@ -216,7 +235,7 @@
         </section>
 
         <!-- Seção 4: lista dinâmica de profissionais, fotos e canvas de assinatura. -->
-        <section class="card">
+        <section class="card" data-form-step="4">
           <h2>4. Relação de profissionais e assinaturas</h2>
           <p class="hint">Capture a foto do servidor e assine no campo correspondente. A foto deve mostrar o rosto do servidor com o crachá funcional visível. Foto, assinatura, data/hora, matrícula e demais dados entram no comprovante técnico da PET.</p>
           <div id="peopleList" class="people-list"></div>
@@ -227,7 +246,7 @@
         </section>
 
         <!-- Seção 5: ciência das orientações e observações gerais. -->
-        <section class="card">
+        <section class="card" data-form-step="5">
           <h2>5. Nota de orientação e ciência</h2>
           <ol class="orientation">
             <li>O acesso ao espaço confinado só deve ocorrer após a emissão e endosso da PET.</li>
@@ -246,9 +265,9 @@
         </section>
 
         <!-- Seção 6: comandos de validação, finalização, impressão e comprovante técnico. -->
-        <section class="card status-card no-print">
+        <section class="card status-card no-print" data-form-step="6">
           <h2>6. Finalização e documentos</h2>
-          <div id="validationBox" class="validation-box">Preencha o formulário e clique em “Validar”. Para finalizar e gerar os documentos oficiais, é necessário estar logado e com o dispositivo autorizado.</div>
+          <div id="validationBox" class="validation-box" role="status" aria-live="polite">Preencha o formulário e clique em “Validar”. Para finalizar e gerar os documentos oficiais, é necessário estar logado e com o dispositivo autorizado.</div>
           <div class="actions">
             <button type="button" id="validateBtn" class="secondary">Validar</button>
             <button type="button" id="finalizeBtn">Finalizar PET oficial</button>
@@ -417,7 +436,7 @@
     <section id="recordsTab" class="tab">
       <section class="card">
         <h2>Registros salvos neste dispositivo</h2>
-        <p class="hint">Registros salvos apenas neste dispositivo. Os dados locais são temporários e podem desaparecer por limpeza do navegador, troca de aparelho ou atualização do sistema. Após gerar a PET, envie imediatamente o PDF e o comprovante técnico ao supervisor responsável.</p>
+        <p class="hint">Registros salvos apenas neste dispositivo (até 30 referências recentes). Os dados locais são temporários e podem desaparecer por limpeza do navegador, troca de aparelho ou atualização do sistema. Após gerar a PET, envie imediatamente o PDF e o comprovante técnico ao supervisor responsável.</p>
         <div class="actions no-print">
           <button type="button" id="refreshRecords" class="secondary">Atualizar lista</button>
         </div>
@@ -452,6 +471,11 @@
     <span>PET Digital NR-33 — DMAE • Permissão de Entrada e Trabalho para Espaço Confinado</span>
   </footer>
 
-  <script src="app.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js" integrity="sha512-BNaRQnYJYiPSqHHDb58B0yaPfCu+Wgds8Gp/gU33kqBtgNS4tSPHuGibyoeqMV/TJlSKda6FXzoEyYGjTe+vXA==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/4.2.1/jspdf.umd.min.js" integrity="sha512-+EeCylkt9WHJk5tGJxYdecHOcXFRME7qnbsfeMsdQL6NUPYm2+uGFmyleEqsmVoap/f3dN/sc3BX9t9kHXkHHg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script defer src="app-core.js"></script>
+  <script defer src="app-system.js"></script>
+  <script defer src="app-form.js"></script>
+  <script defer src="app-output.js"></script>
 </body>
 </html>

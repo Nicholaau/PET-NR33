@@ -1,29 +1,31 @@
-# Frontend - PET-Digital NR-33 v1.1.4
+# Frontend — PET-Digital NR-33 v1.1.5
 
-Publique **todo o conteúdo desta pasta** no projeto Cloudflare Pages `pet-digital`.
+Publique **todos os arquivos desta pasta** no Cloudflare Pages, inclusive `_headers`.
 
-## Fluxo oficial
+## Ordem dos scripts
 
-1. Login.
-2. Dispositivo autorizado.
-3. Preenchimento e validação.
-4. Geração local do PDF e do comprovante.
-5. Cálculo dos hashes reais dos arquivos.
-6. Registro atômico no Worker/D1.
-7. Compartilhamento manual dos dois arquivos com o supervisor.
+O `index.html` carrega:
 
-## Segurança local
+1. bibliotecas de PDF com SRI;
+2. `app-core.js`;
+3. `app-system.js`;
+4. `app-form.js`;
+5. `app-output.js`.
 
-- rascunhos, registros, arquivos oficiais e chave criptográfica local são separados por usuário;
-- arquivos oficiais ficam no IndexedDB com chave composta por usuário e registro;
-- logout limpa o estado em memória;
-- o Service Worker armazena somente HTML, CSS, JavaScript, manifesto e logo;
-- chamadas de API e respostas autenticadas nunca entram no cache offline.
+Não altere a ordem dos quatro módulos sem revisar as dependências compartilhadas.
 
-## Validação
+## Dados locais
 
-A aba Validar exige PDF + JSON e consulta o Worker. Uma conferência apenas local não é apresentada como validação oficial.
+- rascunho e referências de registros são separados por usuário;
+- `localStorage` guarda no máximo 30 referências compactas;
+- PDF, comprovante e snapshot completo ficam no IndexedDB;
+- chave privada não exportável fica no IndexedDB criptográfico;
+- qualquer falha de cota local é mostrada ao usuário;
+- logout limpa o estado em memória.
 
-## Compatibilidade
+## Segurança do frontend
 
-Registros antigos com hashes de PDF/JSON ausentes não podem ser confirmados pela validação oficial exata da v1.1.4. O novo fluxo é aplicado às emissões realizadas após a atualização do Worker, D1 e Pages.
+- `_headers` aplica CSP e outros cabeçalhos no Pages;
+- bibliotecas externas possuem SRI;
+- Service Worker guarda apenas arquivos estáticos do próprio Pages;
+- nenhuma resposta da API ou requisição com Authorization é armazenada offline.

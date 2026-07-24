@@ -152,19 +152,19 @@ th { background: #dde5ef; color: #172033; text-align: center; }
 /* Em telas estreitas, a tabela de gases vira cartões verticais para eliminar rolagem lateral. */
 @media (max-width: 700px) {
   .gas-wrap { overflow-x: visible; border: 0; }
-  .gas-table, .gas-table tbody, .gas-table tr, .gas-table td { display: block; width: 100%; }
+  .gas-table, .gas-table tbody, .gas-table tr, .gas-table td, .gas-table th[scope="row"] { display: block; width: 100%; }
   .gas-table thead { display: none; }
   .gas-table tr { border: 1px solid var(--line); border-radius: 12px; margin-bottom: 12px; overflow: hidden; background: #fff; }
-  .gas-table td { border: 0; border-bottom: 1px solid var(--line); padding: 10px; }
-  .gas-table td:last-child { border-bottom: 0; }
-  .gas-table td::before { display: block; margin-bottom: 4px; color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
-  .gas-table td:nth-child(1)::before { content: "Teste"; }
-  .gas-table td:nth-child(2)::before { content: "Hora"; }
-  .gas-table td:nth-child(3)::before { content: "Oxigênio (%)"; }
-  .gas-table td:nth-child(4)::before { content: "Inflamável (% LIE)"; }
-  .gas-table td:nth-child(5)::before { content: "H₂S (ppm)"; }
-  .gas-table td:nth-child(6)::before { content: "CO (ppm)"; }
-  .gas-table td:nth-child(7)::before { content: "Observações"; }
+  .gas-table td, .gas-table th[scope="row"] { border: 0; border-bottom: 1px solid var(--line); padding: 10px; background: #fff; color: var(--text); }
+  .gas-table tr > :last-child { border-bottom: 0; }
+  .gas-table tr > *::before { display: block; margin-bottom: 4px; color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
+  .gas-table tr > :nth-child(1)::before { content: "Teste"; }
+  .gas-table tr > :nth-child(2)::before { content: "Hora"; }
+  .gas-table tr > :nth-child(3)::before { content: "Oxigênio (%)"; }
+  .gas-table tr > :nth-child(4)::before { content: "Inflamável (% LIE)"; }
+  .gas-table tr > :nth-child(5)::before { content: "H₂S (ppm)"; }
+  .gas-table tr > :nth-child(6)::before { content: "CO (ppm)"; }
+  .gas-table tr > :nth-child(7)::before { content: "Observações"; }
   .gas-table input { min-width: 0; width: 100%; }
 }
 
@@ -279,7 +279,7 @@ th { background: #dde5ef; color: #172033; text-align: center; }
   .app-dialog { padding: 16px; }
 }
 
-/* Ajustes v1.1.4: validações impeditivas, justificativa de N/A e importação conjunta PDF + JSON. */
+/* Ajustes herdados da v1.1.4: validações impeditivas, justificativa de N/A e importação conjunta PDF + JSON. */
 .critical-note { display: block; margin-top: 4px; color: var(--danger); font-size: 11px; font-weight: 800; }
 .na-justification-row td { background: #fff8e8; padding: 8px; }
 .na-justification-row label { margin: 0; }
@@ -287,3 +287,25 @@ th { background: #dde5ef; color: #172033; text-align: center; }
 .verify-file-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 14px 0; }
 .verify-file-grid input[type="file"] { width: 100%; overflow-wrap: anywhere; }
 @media (max-width: 700px) { .verify-file-grid { grid-template-columns: 1fr; } }
+
+
+/* v1.1.5 — formulário guiado e acessibilidade móvel. */
+.form-wizard { position: sticky; top: 76px; z-index: 8; background: #fff; border: 1px solid #c9d6e2; border-radius: 12px; padding: 12px; margin: 12px 0; box-shadow: 0 4px 14px rgba(0,0,0,.08); }
+.form-progress-head { display: grid; grid-template-columns: 1fr minmax(130px, 260px); gap: 12px; align-items: center; }
+.form-progress-head progress { width: 100%; height: 16px; }
+.form-step-buttons { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; margin-top: 10px; }
+.form-step-buttons button { min-height: 42px; padding: 7px; font-size: .82rem; white-space: normal; }
+.form-step-buttons button.active { outline: 3px solid rgba(11,58,102,.22); background: #0b3a66; color: #fff; }
+.form-step-nav { display: flex; justify-content: space-between; gap: 10px; margin-top: 10px; }
+.form-step-hidden { display: none !important; }
+[data-form-step] { scroll-margin-top: 230px; }
+.gas-table input { min-width: 0; width: 100%; }
+.gas-table th[scope="row"] { text-align: left; }
+
+@media (max-width: 760px) {
+  .form-wizard { top: 8px; }
+  .form-progress-head { grid-template-columns: 1fr; gap: 6px; }
+  .form-step-buttons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: visible; }
+  .form-step-buttons button { min-width: 0; }
+  [data-form-step] { scroll-margin-top: 205px; }
+}

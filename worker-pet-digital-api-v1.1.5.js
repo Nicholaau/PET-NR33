@@ -1,5 +1,5 @@
 /**
- * PET-Digital NR-33 v1.1.4 — Worker/API Cloudflare comentado.
+ * PET-Digital NR-33 v1.1.5 — Worker/API Cloudflare comentado.
  *
  * O que é este arquivo?
  * - É a API backend do PET-Digital. Ele roda no Cloudflare Worker.
@@ -38,6 +38,23 @@ const SESSION_BYTES = 32;
 const SESSION_TTL_DEFAULT = 28800;
 // Tempo padrão para desafios criptográficos, reservado para evoluções de assinatura/desafio.
 const CHALLENGE_TTL_DEFAULT = 300;
+
+// Limites de autenticação. Podem ser sobrescritos por variáveis do Worker.
+const LOGIN_WINDOW_SECONDS_DEFAULT = 900;
+const LOGIN_LOCK_SECONDS_DEFAULT = 900;
+const LOGIN_MAX_ACCOUNT_DEFAULT = 5;
+const LOGIN_MAX_IP_DEFAULT = 20;
+
+// Limites defensivos do registro oficial.
+const MAX_JSON_BODY_BYTES = 1024 * 1024;
+const MAX_PET_REQUEST_BYTES = 16 * 1024 * 1024;
+const MAX_PDF_BYTES = 8 * 1024 * 1024;
+const MAX_DOSSIER_BYTES = 6 * 1024 * 1024;
+const MAX_PARTICIPANTS = 20;
+const MAX_ENTRANTES = 15;
+const MAX_VIGIAS = 4;
+const MAX_PARTICIPANT_IMAGE_DATA_URL_BYTES = 350 * 1024;
+
 // Expressão que valida SHA-256 em hexadecimal: 64 caracteres de 0-9/a-f.
 const HASH_RE = /^[a-f0-9]{64}$/i;
 // Padrões criptográficos aceitos. O perfil antigo permanece apenas para validar registros v1.1.3.
@@ -103,6 +120,7 @@ async function route(request, env, url) {
   if (request.method === 'POST' && path === '/auth/login') return login(request, env);
   if (request.method === 'POST' && path === '/auth/logout') return logout(request, env);
   if (request.method === 'GET' && path === '/auth/me') return me(request, env);
+  if (request.method === 'GET' && path === '/client-context') return clientContext(request, env);
   if (request.method === 'POST' && path === '/auth/change-password') return changeOwnPassword(request, env);
 
   if (request.method === 'GET' && path === '/users') return listUsers(request, env);
@@ -161,16 +179,26 @@ async function login(request, env) {
   const password = String(body.password || '');
   if (!matricula || !password) throw httpError(400, 'Informe matrícula e senha.');
 
+  // Limites independentes por matrícula e por IP são conferidos antes do PBKDF2.
+  const rateScopes = await assertLoginAllowed(request, env, matricula);
+
   const user = await env.DB.prepare('SELECT * FROM app_users WHERE matricula = ?').bind(matricula).first();
   if (!user || user.status !== 'active') {
-    await audit(env, user?.id || null, 'auth_login', 'app_users', user?.id || null, 'failure', request, { reason: 'inactive_or_not_found', matricula });
+    const block = await recordLoginFailure(env, rateScopes);
+    await audit(env, user?.id || null, 'auth_login', 'app_users', user?.id || null, block.blocked ? 'blocked' : 'failure', request, { reason: 'inactive_or_not_found', matricula });
+    if (block.blocked) throw httpError(429, block.message);
     throw httpError(401, 'Matrícula ou senha inválida.');
   }
+
   const ok = await verifyPassword(password, user, env);
   if (!ok) {
-    await audit(env, user.id, 'auth_login', 'app_users', user.id, 'failure', request, { reason: 'bad_password' });
+    const block = await recordLoginFailure(env, rateScopes);
+    await audit(env, user.id, 'auth_login', 'app_users', user.id, block.blocked ? 'blocked' : 'failure', request, { reason: 'bad_password' });
+    if (block.blocked) throw httpError(429, block.message);
     throw httpError(401, 'Matrícula ou senha inválida.');
   }
+
+  await clearLoginFailures(env, rateScopes);
 
   const token = randomToken(SESSION_BYTES);
   const sessionHash = await sha256Hex(`session:${token}:${env.SESSION_SECRET}`);
@@ -206,6 +234,24 @@ async function logout(request, env) {
 async function me(request, env) {
   const auth = await requireAuth(request, env);
   return json({ ok: true, user: publicUser(auth.user), session: { expires_at: auth.session.expires_at } });
+}
+
+
+/**
+ * O quê: devolve dados técnicos observados pelo próprio Worker.
+ * Como: exige sessão válida e retorna data/hora do servidor, IP e localização da borda.
+ * Quando: na montagem da prova de geração do PDF.
+ */
+async function clientContext(request, env) {
+  await requireAuth(request, env);
+  return json({
+    ok: true,
+    serverTime: nowIso(),
+    ip: clientIp(request),
+    source: 'cloudflare-worker',
+    colo: request.cf?.colo || null,
+    country: request.cf?.country || null
+  });
 }
 
 
@@ -417,11 +463,13 @@ async function registerDevice(request, env) {
  */
 async function listDevices(request, env) {
   const auth = await requireAuth(request, env);
-  const canSeeAll = ['admin', 'gestor'].includes(auth.user.role);
-  const sql = `SELECT dk.id, dk.user_id, u.name AS user_name, u.matricula AS user_matricula, u.status AS user_status, dk.device_label, dk.public_key_hash, dk.algorithm, dk.status, dk.created_at, dk.approved_at, dk.revoked_at, dk.last_used_at
-    FROM device_keys dk LEFT JOIN app_users u ON u.id = dk.user_id ${canSeeAll ? '' : 'WHERE dk.user_id = ?'} ORDER BY CASE dk.status WHEN 'pending' THEN 1 WHEN 'active' THEN 2 ELSE 3 END, dk.created_at DESC`;
+  const isAdmin = auth.user.role === 'admin';
+  const isManager = auth.user.role === 'gestor';
+  const where = isAdmin ? '' : isManager ? "WHERE u.role IN ('operacional','verificador')" : 'WHERE dk.user_id = ?';
+  const sql = `SELECT dk.id, dk.user_id, u.name AS user_name, u.matricula AS user_matricula, u.role AS user_role, u.status AS user_status, dk.device_label, dk.public_key_hash, dk.algorithm, dk.status, dk.created_at, dk.approved_at, dk.revoked_at, dk.last_used_at
+    FROM device_keys dk LEFT JOIN app_users u ON u.id = dk.user_id ${where} ORDER BY CASE dk.status WHEN 'pending' THEN 1 WHEN 'active' THEN 2 ELSE 3 END, dk.created_at DESC`;
   const stmt = env.DB.prepare(sql);
-  const rows = canSeeAll ? await stmt.all() : await stmt.bind(auth.user.id).all();
+  const rows = (isAdmin || isManager) ? await stmt.all() : await stmt.bind(auth.user.id).all();
   return json({ ok: true, devices: rows.results });
 }
 
@@ -432,8 +480,9 @@ async function listDevices(request, env) {
  */
 async function approveDevice(request, env, deviceId) {
   const auth = await requireRole(request, env, ['admin', 'gestor']);
-  const device = await env.DB.prepare(`SELECT dk.*, u.status AS user_status FROM device_keys dk JOIN app_users u ON u.id = dk.user_id WHERE dk.id = ?`).bind(deviceId).first();
+  const device = await env.DB.prepare(`SELECT dk.*, u.role AS user_role, u.status AS user_status FROM device_keys dk JOIN app_users u ON u.id = dk.user_id WHERE dk.id = ?`).bind(deviceId).first();
   if (!device) throw httpError(404, 'Dispositivo não encontrado.');
+  assertCanManageDevice(auth.user, device);
   if (device.user_status !== 'active') throw httpError(400, 'O usuário deste dispositivo não está ativo.');
   if (device.status === 'active') return json({ ok: true, alreadyActive: true, message: 'O dispositivo já estava autorizado.' });
   await env.DB.prepare(`UPDATE device_keys SET status = 'active', approved_by = ?, approved_at = ?, revoked_by = NULL, revoked_at = NULL, revoke_reason = NULL WHERE id = ?`).bind(auth.user.id, nowIso(), deviceId).run();
@@ -449,8 +498,9 @@ async function approveDevice(request, env, deviceId) {
 async function revokeDevice(request, env, deviceId) {
   const auth = await requireRole(request, env, ['admin', 'gestor']);
   const body = await readJson(request).catch(() => ({}));
-  const device = await env.DB.prepare('SELECT * FROM device_keys WHERE id = ?').bind(deviceId).first();
+  const device = await env.DB.prepare(`SELECT dk.*, u.role AS user_role, u.status AS user_status FROM device_keys dk JOIN app_users u ON u.id = dk.user_id WHERE dk.id = ?`).bind(deviceId).first();
   if (!device) throw httpError(404, 'Dispositivo não encontrado.');
+  assertCanManageDevice(auth.user, device);
   if (device.status === 'revoked') return json({ ok: true, alreadyRevoked: true, message: 'O dispositivo já estava revogado.' });
   await env.DB.prepare(`UPDATE device_keys SET status = 'revoked', revoked_by = ?, revoked_at = ?, revoke_reason = ? WHERE id = ?`).bind(auth.user.id, nowIso(), clean(body.reason || (device.status === 'pending' ? 'Solicitação rejeitada' : 'Revogação manual')), deviceId).run();
   await audit(env, auth.user.id, 'device_revoke', 'device_keys', deviceId, 'success', request, { previousStatus: device.status });
@@ -466,7 +516,7 @@ async function revokeDevice(request, env, deviceId) {
 async function createPetRecord(request, env) {
   const auth = await requireAuth(request, env);
   if (auth.user.mustChangePassword) throw httpError(403, 'Altere a senha temporária antes de registrar uma PET oficial.');
-  const body = await readJson(request);
+  const body = await readJson(request, MAX_PET_REQUEST_BYTES);
 
   const idempotencyKey = clean(body.idempotencyKey);
   if (!idempotencyKey || idempotencyKey.length < 16 || idempotencyKey.length > 100) {
@@ -480,9 +530,9 @@ async function createPetRecord(request, env) {
   let pdfBytes;
   try { pdfBytes = base64ToBytes(body.pdfBase64); }
   catch { throw httpError(400, 'O conteúdo Base64 do PDF é inválido.'); }
-  if (!pdfBytes.length || pdfBytes.length > 20 * 1024 * 1024) throw httpError(413, 'O PDF está vazio ou excede o limite de 20 MB.');
+  if (!pdfBytes.length || pdfBytes.length > MAX_PDF_BYTES) throw httpError(413, `O PDF está vazio ou excede o limite de ${MAX_PDF_BYTES / 1024 / 1024} MB.`);
   const jsonBytesLength = new TextEncoder().encode(body.jsonText).length;
-  if (jsonBytesLength > 20 * 1024 * 1024) throw httpError(413, 'O comprovante técnico excede o limite de 20 MB.');
+  if (jsonBytesLength > MAX_DOSSIER_BYTES) throw httpError(413, `O comprovante técnico excede o limite de ${MAX_DOSSIER_BYTES / 1024 / 1024} MB.`);
 
   const pdfHash = await sha256HexBytes(pdfBytes);
   const jsonHash = await sha256Hex(body.jsonText);
@@ -490,6 +540,7 @@ async function createPetRecord(request, env) {
   try { dossier = JSON.parse(body.jsonText); }
   catch { throw httpError(400, 'O comprovante técnico não contém JSON válido.'); }
   if (!dossier?.payload || !dossier?.integrity || !dossier?.fileIntegrity) throw httpError(400, 'Estrutura do comprovante técnico inválida.');
+  assertParticipantLimits(Array.isArray(dossier.payload?.professionals) ? dossier.payload.professionals : []);
 
   const payload = dossier.payload;
   const integrity = dossier.integrity;
@@ -572,6 +623,9 @@ async function createPetRecord(request, env) {
     throw httpError(409, 'Conflito: o conteúdo informado já está vinculado a outro número, usuário ou arquivo.');
   }
 
+  const participantRows = Array.isArray(payload.professionals) ? payload.professionals : [];
+  assertParticipantLimits(participantRows);
+
   const geo = proof.geolocation && proof.geolocation.available ? proof.geolocation : null;
   if (geo) {
     const lat = Number(geo.latitude);
@@ -584,7 +638,6 @@ async function createPetRecord(request, env) {
 
   const id = crypto.randomUUID();
   const now = nowIso();
-  const participantRows = Array.isArray(payload.professionals) ? payload.professionals : [];
   const validationProfile = clean(payload.proofStandard?.validationProfile || env.VALIDATION_PROFILE || 'PET-DIGITAL-NR33-v1');
   const schemaVersion = clean(payload.schema || '');
   const statements = [
@@ -592,8 +645,8 @@ async function createPetRecord(request, env) {
       id, numero_pet, created_by_user_id, signing_key_id, validation_profile, schema_version,
       payload_hash, pdf_hash, json_hash, pdf_proof_hash, pet_signature_b64, pdf_proof_signature_b64,
       client_generated_at, server_received_at, client_timezone, ip_address, user_agent,
-      geo_lat, geo_lng, geo_accuracy_m, status, notes, idempotency_key
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?)`)
+      geo_lat, geo_lng, geo_accuracy_m, status, notes, idempotency_key, participant_count
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?, ?)`)
       .bind(
         id, numeroPet, auth.user.id, device.id, validationProfile, schemaVersion,
         payloadHash, pdfHash, jsonHash, pdfProofHash, petSignatureB64, pdfProofSignatureB64,
@@ -601,7 +654,7 @@ async function createPetRecord(request, env) {
         clean(proof.timezone || null), clientIp(request), request.headers.get('user-agent') || '',
         geo ? Number(geo.latitude) : null, geo ? Number(geo.longitude) : null,
         geo ? Number(geo.accuracyMeters ?? geo.accuracy ?? 0) : null,
-        null, idempotencyKey
+        null, idempotencyKey, participantRows.length
       ),
     env.DB.prepare('UPDATE device_keys SET last_used_at = ? WHERE id = ?').bind(now, device.id)
   ];
@@ -636,7 +689,20 @@ async function createPetRecord(request, env) {
     }
     throw error;
   }
-  await audit(env, auth.user.id, 'pet_record_create', 'pet_records', id, 'success', request, { numeroPet, payloadHash, pdfHash, jsonHash, publicKeyHash, idempotencyKey });
+
+  // DB.batch grava o registro e todos os participantes como uma unidade. A contagem
+  // posterior é uma barreira adicional para nunca devolver uma PET incompleta.
+  const insertedCount = await env.DB.prepare('SELECT COUNT(*) AS count FROM pet_participant_hashes WHERE pet_record_id = ?').bind(id).first();
+  if (Number(insertedCount?.count || 0) !== participantRows.length) {
+    await env.DB.batch([
+      env.DB.prepare('DELETE FROM pet_participant_hashes WHERE pet_record_id = ?').bind(id),
+      env.DB.prepare('DELETE FROM pet_records WHERE id = ?').bind(id)
+    ]);
+    await audit(env, auth.user.id, 'pet_record_create', 'pet_records', id, 'blocked', request, { reason: 'participant_count_mismatch', expected: participantRows.length, actual: Number(insertedCount?.count || 0) });
+    throw httpError(500, 'O registro não foi concluído porque a equipe ficou incompleta. Nenhuma PET foi aceita.');
+  }
+
+  await audit(env, auth.user.id, 'pet_record_create', 'pet_records', id, 'success', request, { numeroPet, payloadHash, pdfHash, jsonHash, publicKeyHash, idempotencyKey, participantCount: participantRows.length });
   const record = await env.DB.prepare('SELECT * FROM pet_records WHERE id = ?').bind(id).first();
   return json({ ok: true, petRecord: publicPetRecord(record) }, 201);
 }
@@ -679,7 +745,7 @@ async function validateHash(request, env) {
  */
 async function validateDocument(request, env) {
   const auth = await requireRole(request, env, ['admin', 'gestor', 'verificador']);
-  const body = await readJson(request);
+  const body = await readJson(request, MAX_PET_REQUEST_BYTES);
   assertText(body.pdfBase64, 'Conteúdo do PDF obrigatório para validação oficial.');
   if (typeof body.jsonText !== 'string' || !body.jsonText.trim()) throw httpError(400, 'Comprovante técnico obrigatório para validação oficial.');
 
@@ -688,9 +754,9 @@ async function validateDocument(request, env) {
   let pdfBytes;
   try { pdfBytes = base64ToBytes(body.pdfBase64); }
   catch { throw httpError(400, 'O conteúdo Base64 do PDF é inválido.'); }
-  if (!pdfBytes.length || pdfBytes.length > 20 * 1024 * 1024) throw httpError(413, 'O PDF está vazio ou excede 20 MB.');
+  if (!pdfBytes.length || pdfBytes.length > MAX_PDF_BYTES) throw httpError(413, `O PDF está vazio ou excede ${MAX_PDF_BYTES / 1024 / 1024} MB.`);
   const jsonBytesLength = new TextEncoder().encode(body.jsonText).length;
-  if (jsonBytesLength > 20 * 1024 * 1024) throw httpError(413, 'O comprovante técnico excede 20 MB.');
+  if (jsonBytesLength > MAX_DOSSIER_BYTES) throw httpError(413, `O comprovante técnico excede ${MAX_DOSSIER_BYTES / 1024 / 1024} MB.`);
 
   const pdfHash = await sha256HexBytes(pdfBytes);
   const jsonHash = await sha256Hex(body.jsonText);
@@ -698,6 +764,7 @@ async function validateDocument(request, env) {
   try { dossier = JSON.parse(body.jsonText); }
   catch { throw httpError(400, 'O comprovante técnico não contém JSON válido.'); }
   if (!dossier?.payload || !dossier?.integrity || !dossier?.fileIntegrity) throw httpError(400, 'Estrutura do comprovante técnico inválida.');
+  assertParticipantLimits(Array.isArray(dossier.payload?.professionals) ? dossier.payload.professionals : []);
   assertSupportedProofStandard(dossier.payload.proofStandard, 'PET_PAYLOAD');
 
   const numeroPet = clean(dossier.payload?.fields?.petNumero);
@@ -751,9 +818,14 @@ async function validateDocument(request, env) {
   const receivedAt = Date.parse(record.server_received_at);
   const revokedAt = record.revoked_at ? Date.parse(record.revoked_at) : NaN;
   const keyAuthorizedAtRegistration = Number.isFinite(approvedAt) && approvedAt <= receivedAt && (!Number.isFinite(revokedAt) || revokedAt >= receivedAt);
-  const valid = record.status === 'accepted' && keyAuthorizedAtRegistration && petSignatureOk && proofSignatureOk && storedSignaturesMatch;
+  const participantCountRow = await env.DB.prepare('SELECT COUNT(*) AS count FROM pet_participant_hashes WHERE pet_record_id = ?').bind(record.id).first();
+  const storedParticipantCount = Number(participantCountRow?.count || 0);
+  const dossierParticipantCount = Array.isArray(dossier.payload?.professionals) ? dossier.payload.professionals.length : 0;
+  const participantSetComplete = storedParticipantCount === dossierParticipantCount
+    && storedParticipantCount === Number(record.participant_count ?? storedParticipantCount);
+  const valid = record.status === 'accepted' && keyAuthorizedAtRegistration && petSignatureOk && proofSignatureOk && storedSignaturesMatch && participantSetComplete;
   await audit(env, auth.user.id, 'document_validate', 'pet_records', record.id, valid ? 'success' : 'failure', request, {
-    numeroPet, keyAuthorizedAtRegistration, petSignatureOk, proofSignatureOk, storedSignaturesMatch, currentKeyStatus: record.current_key_status
+    numeroPet, keyAuthorizedAtRegistration, petSignatureOk, proofSignatureOk, storedSignaturesMatch, participantSetComplete, currentKeyStatus: record.current_key_status
   });
   return json({
     ok: true,
@@ -761,6 +833,7 @@ async function validateDocument(request, env) {
     found: true,
     keyAuthorizedAtRegistration,
     signaturesValid: petSignatureOk && proofSignatureOk && storedSignaturesMatch,
+    participantSetComplete,
     currentKeyStatus: record.current_key_status,
     record: publicPetRecord(record),
     issuer: { userId: record.created_by_user_id, name: record.created_by_name, matricula: record.created_by_matricula },
@@ -831,6 +904,15 @@ function assertCanManageTarget(actor, target) {
   throw httpError(403, 'Gestor pode administrar somente usuários operacionais e verificadores. Usuários gestor/admin exigem um administrador.');
 }
 
+/**
+ * Aplica a hierarquia de usuários também às autorizações de dispositivo.
+ */
+function assertCanManageDevice(actor, device) {
+  if (actor.role === 'admin') return;
+  if (actor.role === 'gestor' && ['operacional', 'verificador'].includes(device.user_role)) return;
+  throw httpError(403, 'Gestor não pode administrar dispositivos de gestor ou administrador.');
+}
+
 /** O quê: valida perfil que o ator pode atribuir; Como: admin todos, gestor somente níveis inferiores; Quando: cadastro e edição. */
 function assertRoleAllowedForActor(actor, role) {
   const all = ['admin', 'gestor', 'verificador', 'operacional'];
@@ -847,6 +929,81 @@ async function ensureAnotherActiveAdmin(env, excludedUserId) {
 /** O quê: encerra todas as sessões de um usuário; Como: marca revoked_at; Quando: reset de senha, suspensão ou exclusão. */
 async function revokeUserSessions(env, userId) {
   await env.DB.prepare('UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE user_id = ?').bind(nowIso(), userId).run();
+}
+
+/**
+ * Cria identificadores opacos para os limites por matrícula e por IP.
+ */
+async function loginRateScopes(request, env, matricula) {
+  const normalizedMatricula = String(matricula || '').trim().toLowerCase();
+  const ip = clientIp(request) || 'ip-desconhecido';
+  return [
+    { key: 'account:' + await sha256Hex(`login-account:${normalizedMatricula}:${env.SESSION_SECRET}`), limit: positiveInt(env.LOGIN_MAX_ACCOUNT, LOGIN_MAX_ACCOUNT_DEFAULT) },
+    { key: 'ip:' + await sha256Hex(`login-ip:${ip}:${env.SESSION_SECRET}`), limit: positiveInt(env.LOGIN_MAX_IP, LOGIN_MAX_IP_DEFAULT) }
+  ];
+}
+
+/** Impede nova tentativa enquanto algum escopo estiver bloqueado. */
+async function assertLoginAllowed(request, env, matricula) {
+  const scopes = await loginRateScopes(request, env, matricula);
+  const now = Date.now();
+  for (const scope of scopes) {
+    const row = await env.DB.prepare('SELECT blocked_until FROM auth_rate_limits WHERE scope_key = ?').bind(scope.key).first();
+    const blockedUntil = row?.blocked_until ? Date.parse(row.blocked_until) : NaN;
+    if (Number.isFinite(blockedUntil) && blockedUntil > now) {
+      const seconds = Math.max(1, Math.ceil((blockedUntil - now) / 1000));
+      throw httpError(429, `Muitas tentativas de acesso. Aguarde aproximadamente ${Math.ceil(seconds / 60)} minuto(s) e tente novamente.`);
+    }
+  }
+  return scopes;
+}
+
+/** Registra falha e bloqueia temporariamente quando o limite da janela for atingido. */
+async function recordLoginFailure(env, scopes) {
+  const now = new Date();
+  const nowText = now.toISOString();
+  const windowSeconds = positiveInt(env.LOGIN_WINDOW_SECONDS, LOGIN_WINDOW_SECONDS_DEFAULT);
+  const lockSeconds = positiveInt(env.LOGIN_LOCK_SECONDS, LOGIN_LOCK_SECONDS_DEFAULT);
+  const cutoff = new Date(now.getTime() - windowSeconds * 1000).toISOString();
+  const blockedUntil = new Date(now.getTime() + lockSeconds * 1000).toISOString();
+  let blocked = false;
+
+  for (const scope of scopes) {
+    await env.DB.prepare(`
+      INSERT INTO auth_rate_limits (scope_key, failed_count, window_started_at, blocked_until, updated_at)
+      VALUES (?, 1, ?, NULL, ?)
+      ON CONFLICT(scope_key) DO UPDATE SET
+        failed_count = CASE WHEN auth_rate_limits.window_started_at < ? THEN 1 ELSE auth_rate_limits.failed_count + 1 END,
+        window_started_at = CASE WHEN auth_rate_limits.window_started_at < ? THEN ? ELSE auth_rate_limits.window_started_at END,
+        blocked_until = CASE
+          WHEN (CASE WHEN auth_rate_limits.window_started_at < ? THEN 1 ELSE auth_rate_limits.failed_count + 1 END) >= ?
+          THEN ?
+          ELSE NULL
+        END,
+        updated_at = ?
+    `).bind(scope.key, nowText, nowText, cutoff, cutoff, nowText, cutoff, scope.limit, blockedUntil, nowText).run();
+
+    const row = await env.DB.prepare('SELECT blocked_until FROM auth_rate_limits WHERE scope_key = ?').bind(scope.key).first();
+    if (row?.blocked_until && Date.parse(row.blocked_until) > Date.now()) blocked = true;
+  }
+
+  return {
+    blocked,
+    message: blocked
+      ? `Muitas tentativas de acesso. O login foi temporariamente bloqueado por ${Math.ceil(lockSeconds / 60)} minuto(s).`
+      : 'Matrícula ou senha inválida.'
+  };
+}
+
+/** Limpa os contadores depois de um login válido. */
+async function clearLoginFailures(env, scopes) {
+  if (!scopes?.length) return;
+  await env.DB.batch(scopes.map(scope => env.DB.prepare('DELETE FROM auth_rate_limits WHERE scope_key = ?').bind(scope.key)));
+}
+
+function positiveInt(value, fallback) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : fallback;
 }
 
 /**
@@ -929,6 +1086,30 @@ function assertSupportedProofStandard(standard, expectedScope) {
   if (clean(standard.canonicalizationAlgorithm) !== CANONICALIZATION_ALGORITHM) throw httpError(400, 'Regra de normalização JSON não suportada.');
   if (clean(standard.hashAlgorithm) !== HASH_ALGORITHM) throw httpError(400, 'Algoritmo de hash não suportado.');
   if (clean(standard.signatureAlgorithm) !== SIGNATURE_ALGORITHM) throw httpError(400, 'Algoritmo de assinatura não suportado.');
+}
+
+/**
+ * Limita quantidade, papéis e tamanho das imagens antes do processamento criptográfico.
+ */
+function assertParticipantLimits(professionals) {
+  if (!Array.isArray(professionals)) throw httpError(400, 'Relação de participantes inválida.');
+  if (professionals.length < 3) throw httpError(400, 'A PET deve conter ao menos entrante, vigia e supervisor.');
+  if (professionals.length > MAX_PARTICIPANTS) throw httpError(413, `A PET excede o limite de ${MAX_PARTICIPANTS} participantes.`);
+
+  const counts = { entrante: 0, vigia: 0, supervisor: 0 };
+  for (const participant of professionals) {
+    if (!Object.prototype.hasOwnProperty.call(counts, participant?.type)) throw httpError(400, 'Tipo de participante inválido.');
+    counts[participant.type]++;
+    if ((clean(participant.nome) || '').length > 160) throw httpError(413, 'Nome de participante excede 160 caracteres.');
+    if ((clean(participant.matricula) || '').length > 60) throw httpError(413, 'Matrícula de participante excede 60 caracteres.');
+    const photoBytes = new TextEncoder().encode(String(participant.photoDataUrl || '')).length;
+    const signatureBytes = new TextEncoder().encode(String(participant.signatureDataUrl || '')).length;
+    if (photoBytes > MAX_PARTICIPANT_IMAGE_DATA_URL_BYTES) throw httpError(413, 'Foto de participante excede o limite permitido.');
+    if (signatureBytes > MAX_PARTICIPANT_IMAGE_DATA_URL_BYTES) throw httpError(413, 'Assinatura de participante excede o limite permitido.');
+  }
+  if (counts.entrante > MAX_ENTRANTES) throw httpError(413, `Limite de entrantes excedido (${MAX_ENTRANTES}).`);
+  if (counts.vigia > MAX_VIGIAS) throw httpError(413, `Limite de vigias excedido (${MAX_VIGIAS}).`);
+  if (counts.supervisor !== 1) throw httpError(400, 'A PET deve conter exatamente um supervisor.');
 }
 
 async function validatePetPayloadSafety(payload) {
@@ -1052,7 +1233,8 @@ function publicPetRecord(row) {
     client_generated_at: row.client_generated_at,
     created_by_user_id: row.created_by_user_id,
     public_key_hash: row.public_key_hash || null,
-    idempotency_key: row.idempotency_key || null
+    idempotency_key: row.idempotency_key || null,
+    participant_count: Number(row.participant_count || 0)
   };
 }
 
@@ -1127,8 +1309,15 @@ function json(data, status = 200, extraHeaders = {}) {
  * Como: chama `request.json()` e transforma erro de parse em resposta 400 amigável.
  * Quando: rotas POST/PATCH que recebem dados do frontend.
  */
-async function readJson(request) {
-  try { return await request.json(); }
+async function readJson(request, maxBytes = MAX_JSON_BODY_BYTES) {
+  const declaredLength = Number(request.headers.get('content-length') || 0);
+  if (declaredLength && declaredLength > maxBytes) throw httpError(413, 'Requisição excede o limite permitido.');
+  let raw;
+  try { raw = await request.text(); }
+  catch { throw httpError(400, 'Não foi possível ler a requisição.'); }
+  const actualLength = new TextEncoder().encode(raw).length;
+  if (actualLength > maxBytes) throw httpError(413, 'Requisição excede o limite permitido.');
+  try { return raw ? JSON.parse(raw) : {}; }
   catch { throw httpError(400, 'JSON inválido.'); }
 }
 

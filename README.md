@@ -1,151 +1,161 @@
-# PET-Digital NR-33 v1.1.4 - Cloudflare comentado
+# PET-Digital NR-33 v1.1.5 — Cloudflare comentado
 
-Versão de correção de segurança e consistência do **PET-Digital NR-33**, preparada para:
+Versão de endurecimento de segurança, estabilidade, acessibilidade e experiência móvel do PET-Digital NR-33.
 
-- frontend estático no **Cloudflare Pages**;
-- API no **Cloudflare Worker**;
-- usuários, dispositivos, hashes e auditoria no **Cloudflare D1**;
-- PDF e comprovante técnico armazenados apenas temporariamente no dispositivo do usuário.
+## Arquitetura
 
-## URLs configuradas
+- **Cloudflare Pages:** interface do aplicativo.
+- **Cloudflare Worker:** autenticação, autorização, validação e registro.
+- **Cloudflare D1:** usuários, sessões, dispositivos, hashes, participantes e auditoria.
+- **Dispositivo do usuário:** PDF, comprovante técnico, rascunho e chave privada não exportável.
 
-- Worker/API: `https://pet-digital-api.nicholas-dmae.workers.dev`
-- Pages/frontend: `https://pet-digital.pages.dev`
+URLs configuradas:
 
-## Alterações principais da v1.1.4
+- API: `https://pet-digital-api.nicholas-dmae.workers.dev`
+- Frontend: `https://pet-digital.pages.dev`
 
-### 1. Validação oficial não confia apenas no JSON
+O D1 não armazena PDF, JSON, foto ou imagem de assinatura. Os arquivos são recebidos apenas durante a requisição de registro/validação para recálculo independente dos hashes.
 
-A aba **Validar** agora exige os dois arquivos correspondentes:
+## Alterações principais da v1.1.5
 
-- PDF oficial;
-- comprovante técnico JSON.
+### 1. Hierarquia de dispositivos corrigida
 
-O frontend recalcula o hash dos bytes reais dos dois arquivos e consulta o Worker. O servidor somente confirma a PET quando houver coincidência exata de:
+- **Admin:** administra dispositivos de todos os perfis.
+- **Gestor:** visualiza e administra somente dispositivos de `operacional` e `verificador`.
+- Gestor não aprova, reativa, rejeita nem revoga dispositivo de outro gestor ou de administrador.
+- A mesma regra existe na listagem e nos endpoints do Worker.
 
-- número da PET;
-- hash do payload;
-- hash do PDF;
-- hash do JSON;
-- usuário emissor;
-- matrícula do emissor;
-- dispositivo/chave previamente autorizada na data da emissão.
+### 2. Proteção contra força bruta
 
-Um JSON criado com uma chave própria, mas nunca registrado, não é mais apresentado como documento oficialmente válido.
+O Worker limita tentativas de login por dois escopos independentes:
 
-### 2. Cache offline restrito aos arquivos estáticos
+- matrícula normalizada;
+- endereço IP observado pelo Worker.
 
-O Service Worker foi refeito. Ele nunca armazena:
+Padrão adotado:
 
-- chamadas do Worker/API;
-- `/auth/me`, `/users`, `/devices` ou outras respostas autenticadas;
-- requisições com `Authorization`;
-- consulta de IP;
-- respostas de outra origem;
-- dados de sessão.
+- 5 falhas por matrícula em 15 minutos;
+- 20 falhas por IP em 15 minutos;
+- bloqueio temporário de 15 minutos;
+- contadores apagados depois de login válido.
 
-Na instalação da v1.1.4, os caches anteriores são removidos e o novo Service Worker assume imediatamente.
+Os identificadores de matrícula/IP são transformados em códigos opacos antes de serem gravados. Os limites podem ser alterados pelas variáveis opcionais `LOGIN_WINDOW_SECONDS`, `LOGIN_LOCK_SECONDS`, `LOGIN_MAX_ACCOUNT` e `LOGIN_MAX_IP`.
 
-### 3. Regras impeditivas no frontend e no Worker
+### 3. Registro de PET e participantes em lote
 
-A PET é recusada em ambos os lados quando houver, entre outros:
+O Worker monta um único `DB.batch()` com:
 
-- valores negativos nas medições;
-- gases fora dos limites configurados;
-- item crítico marcado como N/A;
-- mais de 5 respostas N/A;
-- N/A sem justificativa objetiva de pelo menos 10 caracteres;
-- matrícula repetida;
-- supervisor da identificação diferente do supervisor assinante;
-- detector não informado, não confirmado ou vencido;
-- foto, assinatura ou respectivos hashes ausentes/incompatíveis;
-- quantidade inválida de supervisor, entrante ou vigia;
-- item impeditivo do checklist.
+- registro principal da PET;
+- todos os participantes;
+- atualização de uso do dispositivo.
 
-Os itens que aceitam N/A e o limite de cinco são regras de aplicação desta versão e devem ser homologados pelo setor responsável por Segurança do Trabalho antes do uso definitivo.
+Depois do lote, confere a quantidade realmente gravada. Se houver qualquer divergência, remove o conjunto e não retorna a PET como aceita. A coluna `participant_count` também é conferida na validação oficial.
 
-### 4. Dados locais separados por usuário
+### 4. Limites defensivos
 
-Rascunhos, histórico, arquivos oficiais temporários e a chave criptográfica local usam identificadores vinculados ao usuário autenticado. Ao sair ou trocar de conta, o estado em memória é limpo e a próxima conta carrega somente seus próprios dados locais.
+Frontend e Worker limitam:
 
-As antigas chaves globais de rascunho e registros são removidas durante o login. A chave criptográfica global das versões anteriores só é migrada quando o Worker confirma que o respectivo código já pertence à conta atual; ela nunca é atribuída automaticamente a outro usuário.
+- 20 participantes no total;
+- 15 entrantes;
+- 4 vigias;
+- exatamente 1 supervisor;
+- tamanho da requisição, PDF, comprovante e imagens dos participantes;
+- nome e matrícula excessivamente longos.
 
-Essa separação é feita pela aplicação. Em dispositivo compartilhado, um usuário com acesso administrativo ao navegador/DevTools ainda pode alcançar dados locais; por isso, o envio imediato ao supervisor e a limpeza controlada do dispositivo continuam obrigatórios.
+Fotos selecionadas são redimensionadas para reduzir consumo de memória, rede e banco.
 
-### 5. PDF e JSON vinculados ao registro do servidor
+### 5. Armazenamento local reduzido e erro visível
 
-A ordem de finalização agora é:
+- `localStorage` mantém no máximo **30 referências compactas**, sem fotos, assinaturas ou dossiê completo.
+- PDF, comprovante e snapshot completo ficam no IndexedDB, separados por usuário.
+- Falha por falta de espaço agora gera aviso visível, em vez de interromper silenciosamente o fluxo.
+- Se a PET já tiver sido aceita pelo Worker, uma falha posterior no armazenamento local não transforma o registro oficial em pendência.
+- O app continua avisando que os arquivos locais são temporários e devem ser enviados imediatamente ao supervisor.
 
-1. validar a PET;
-2. gerar número e chave de idempotência;
-3. assinar o payload;
-4. coletar prova de geração, IP, data/hora e geolocalização disponível;
-5. gerar o PDF final;
-6. calcular o SHA-256 dos bytes reais do PDF;
-7. gerar o JSON final;
-8. calcular o SHA-256 do texto exato do JSON;
-9. enviar temporariamente arquivos, hashes e assinaturas ao Worker;
-10. o Worker recalcula os hashes, valida tudo e grava somente hashes/metadados no D1.
+### 6. Data local correta
 
-O PDF e o JSON não são persistidos no D1.
+O campo de data usa o calendário local do aparelho (`getFullYear/getMonth/getDate`), e não UTC. Isso evita preencher o dia seguinte no período noturno de Uberlândia.
 
-### 6. Proteção contra finalização duplicada
+### 7. Login tradicional por formulário
 
-- o botão é bloqueado durante o processamento;
-- a mesma tentativa reutiliza número, conteúdo e `idempotencyKey`;
-- após sucesso, o botão permanece bloqueado;
-- para nova emissão, é necessário limpar/iniciar outro formulário;
-- o D1 possui índice único para a chave de idempotência;
-- requisições simultâneas também são reconsultadas após eventual conflito de índice e só retornam sucesso quando todo o conjunto coincide.
+Pressionar **Enter** na matrícula ou senha envia o formulário de login. O primeiro cadastro de administrador também usa um formulário próprio.
 
-### 7. Conflitos retornam HTTP 409
+### 8. Preenchimento guiado
 
-Repetição só é aceita como sucesso quando número, payload, PDF, JSON e usuário correspondem ao mesmo registro. Divergência de número, conteúdo ou arquivo retorna conflito `409`; o frontend não informa registro concluído.
+O formulário foi dividido em seis etapas:
+
+1. Identificação;
+2. Checklist;
+3. Atmosfera;
+4. Equipe;
+5. Ciência;
+6. Finalização.
+
+Há indicador de progresso, botões de etapa, avançar/voltar e deslocamento automático para o primeiro campo ou bloco com erro.
+
+### 9. Acessibilidade das medições
+
+Os 12 campos da tabela de gases receberam nomes acessíveis específicos, e a tabela usa cabeçalhos de coluna e linha. O resultado da validação usa região `aria-live`.
+
+### 10. Dependências de PDF e política de segurança
+
+- `html2canvas` 1.4.1 e `jsPDF` 4.2.1 são declarados no HTML com SRI, `crossorigin` e `referrerpolicy`.
+- O frontend inclui CSP no HTML e no arquivo `_headers` do Cloudflare Pages.
+- O app não injeta scripts de CDN dinamicamente.
+- A consulta de IP passou a usar o próprio Worker (`/client-context`), sem serviço público adicional.
+
+### 11. Frontend dividido em módulos
+
+O antigo arquivo único foi separado em:
+
+- `app-core.js` — utilitários, criptografia e armazenamento;
+- `app-system.js` — login, usuários, dispositivos e API;
+- `app-form.js` — formulário, fotos, assinaturas, etapas e finalização;
+- `app-output.js` — PDF, histórico, compartilhamento, validação e inicialização.
+
+Os arquivos continuam sendo scripts clássicos carregados, com `defer`, na ordem indicada pelo `index.html`.
 
 ## Migração obrigatória do D1
 
-Antes de publicar o Worker v1.1.4, execute **uma única vez** no console SQL do D1:
+Depois da v1.1.4 e antes de publicar o Worker v1.1.5, execute **uma única vez**:
 
 ```text
-migrations/0003_security_v114.sql
+migrations/0004_hardening_v115.sql
 ```
 
-Ela adiciona:
+Ela cria `auth_rate_limits` e adiciona `participant_count` em `pet_records`.
 
-- coluna `pet_records.idempotency_key`;
-- índice único de idempotência;
-- índice para validação exata.
-
-Para verificar antes/depois:
+Confirmação:
 
 ```sql
+SELECT name FROM sqlite_master WHERE type='table' AND name='auth_rate_limits';
 PRAGMA table_info(pet_records);
 ```
 
-Se `idempotency_key` já existir, não execute novamente o comando `ALTER TABLE`.
+Não execute novamente o `ALTER TABLE` se `participant_count` já existir.
 
-## Ordem de instalação
+## Instalação resumida
 
-1. Faça backup/exportação do D1, se desejar preservar uma cópia antes da alteração.
-2. Execute `migrations/0003_security_v114.sql` no D1.
-3. No Worker `pet-digital-api`, substitua o código por:
-   - `worker/src/index.js`; ou
-   - `worker-pet-digital-api-v1.1.4.js`.
-4. Faça o deploy do Worker.
-5. Teste `/health` e `/db-test`.
-6. Publique todo o conteúdo de `frontend/` no Cloudflare Pages.
-7. Abra o Pages e aguarde a atualização automática do Service Worker.
-8. Faça os testes descritos em `docs/INSTALACAO_E_TESTE.md`.
+1. Execute `migrations/0004_hardening_v115.sql` no D1.
+2. Substitua o código do Worker por `worker-pet-digital-api-v1.1.5.js` ou `worker/src/index.js`.
+3. Faça o deploy e teste `/health` e `/db-test`.
+4. Publique **todo o conteúdo** de `frontend/`, incluindo `_headers` e os quatro arquivos `app-*.js`.
+5. Reabra o Pages; o Service Worker v1.1.5 remove os caches anteriores.
+6. Execute o roteiro de `docs/INSTALACAO_E_TESTE.md`.
 
-## Estrutura do pacote
+## Estrutura
 
 ```text
-pet-digital-v1.1.4/
+pet-digital-v1.1.5/
 ├── frontend/
 │   ├── index.html
-│   ├── app.js
+│   ├── app-core.js
+│   ├── app-system.js
+│   ├── app-form.js
+│   ├── app-output.js
 │   ├── styles.css
 │   ├── sw.js
+│   ├── _headers
 │   ├── manifest.json
 │   └── logo-dmae-2026.png
 ├── worker/
@@ -155,21 +165,15 @@ pet-digital-v1.1.4/
 ├── migrations/
 │   ├── 0001_schema_v110.sql
 │   ├── 0002_roles_v110.sql
-│   └── 0003_security_v114.sql
+│   ├── 0003_security_v114.sql
+│   └── 0004_hardening_v115.sql
 ├── docs/
-└── worker-pet-digital-api-v1.1.4.js
+└── worker-pet-digital-api-v1.1.5.js
 ```
 
-## Compatibilidade com registros anteriores
+## Observações de homologação
 
-A validação oficial exata da v1.1.4 exige que o registro no D1 possua `pdf_hash`, `json_hash`, prova do PDF e vínculo de dispositivo. PETs antigas registradas antes dessa correção, com esses campos nulos, não passam pelo novo validador oficial. Elas não são alteradas automaticamente; a regra vale para novas emissões feitas pela v1.1.4.
-
-## Aviso operacional exibido no app
-
-Os dados e arquivos da PET permanecem temporariamente no dispositivo. Após concluir a emissão, o usuário deve compartilhar imediatamente o PDF e o comprovante técnico com o supervisor responsável. Limpeza do navegador, troca de aparelho, falta de espaço ou atualização do sistema pode apagar o conteúdo local.
-
-## Limites desta revisão
-
-- Não foi realizado deploy dentro da conta Cloudflare do DMAE a partir deste pacote.
-- Os testes incluídos foram executados localmente sobre sintaxe, estrutura, migração, política de cache, idempotência, validação criptográfica simulada e integridade do pacote.
-- A homologação final deve incluir teste real no Pages/Worker/D1 e validação do fluxo pelo setor de Segurança do Trabalho e pela área responsável por proteção de dados.
+- Faça primeiro emissões fictícias no ambiente real Pages/Worker/D1.
+- Confirme os limites de participantes e de N/A com a Segurança do Trabalho.
+- Teste câmera, geolocalização, compartilhamento e armazenamento nos aparelhos usados em campo.
+- Arquivos locais podem desaparecer; PDF e comprovante devem ser enviados ao supervisor logo após a emissão.
