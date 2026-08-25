@@ -38,3 +38,11 @@
 ## Banco de dados
 
 Não há nova migration para quem já está na v1.1.5.
+
+
+## Hotfix 1 — data/hora após login
+
+- Restaurada `setDefaultDateTime()` no núcleo compartilhado.
+- A função usa `todayISO()` e `nowTime()` e, portanto, mantém a data/hora local do dispositivo.
+- Corrigido o erro `setDefaultDateTime is not defined` observado após login.
+- Cache estático alterado para `pet-digital-static-v1.1.6-hotfix1` para impedir reutilização do JavaScript quebrado.

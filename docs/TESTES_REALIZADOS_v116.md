@@ -16,3 +16,5 @@ Foram executadas verificações locais de desenvolvimento. Elas não substituem 
 - Conferência de que o supervisor é derivado da relação de profissionais no payload final.
 - Teste unitário do montador PDF com páginas JPEG sintéticas: cabeçalho PDF, xref, trailer e `%%EOF` presentes.
 - Teste de integridade do ZIP final com `unzip -t`.
+
+- Verificação do hotfix: `setDefaultDateTime()` está definida no `app-core.js` antes dos módulos que a chamam.

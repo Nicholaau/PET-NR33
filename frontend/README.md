@@ -32,3 +32,7 @@ O PDF é desenhado com Canvas 2D e montado localmente como PDF 1.4. Nenhum scrip
 - `script-src` aceita somente `'self'`;
 - Service Worker guarda apenas arquivos estáticos do próprio Pages;
 - respostas da API e requisições com `Authorization` nunca são armazenadas offline.
+
+## Hotfix 1
+
+Restaurada `setDefaultDateTime()` em `app-core.js` e atualizado o cache do Service Worker para evitar que aparelhos continuem carregando a versão quebrada.

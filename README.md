@@ -1,5 +1,9 @@
 # PET-Digital NR-33 v1.1.6 — Cloudflare comentado
 
+> **Hotfix 1 — 25/08/2026:** restaurada a função `setDefaultDateTime()` no `app-core.js`.
+> O erro aparecia depois de um login válido porque o fluxo carregava o espaço de trabalho e chamava uma função que havia sido removida acidentalmente durante a modularização da v1.1.6. A data continua sendo obtida do relógio local do aparelho, não de UTC. O cache do Service Worker foi alterado para `pet-digital-static-v1.1.6-hotfix1` para forçar a atualização do JavaScript nos aparelhos.
+
+
 Versão de correção e refinamento da experiência de emissão da PET Digital NR-33. Esta entrega mantém a arquitetura **Cloudflare Pages + Worker + D1**, sem armazenar PDF, JSON, fotos ou imagens de assinatura no D1.
 
 ## Arquitetura

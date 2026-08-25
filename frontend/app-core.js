@@ -167,6 +167,23 @@ function nowTime() {
 }
 
 /**
+ * Preenche data e hora padrão do formulário usando o relógio LOCAL do dispositivo.
+ * O quê: define a data da PET e a hora de emissão somente quando esses campos estão vazios.
+ * Como: usa todayISO() e nowTime(), que leem `new Date()` sem converter para UTC.
+ * Quando: após login/carregamento do espaço de trabalho, ao limpar um rascunho e na inicialização do app.
+ *
+ * Importante: esta função existia antes da modularização do frontend e foi restaurada neste hotfix.
+ * A ausência dela causava `setDefaultDateTime is not defined` logo após um login válido.
+ */
+function setDefaultDateTime() {
+  const form = $('#petForm');
+  if (!form) return;
+  if (form.elements.data && !form.elements.data.value) form.elements.data.value = todayISO();
+  if (form.elements.horaEmissao && !form.elements.horaEmissao.value) form.elements.horaEmissao.value = nowTime();
+}
+
+
+/**
  * Serializa objetos de forma determinística para cálculo de hash.
  * Ativação: usada por `sha256Hex` quando o valor recebido é objeto/array.
  * O que faz: ordena alfabeticamente as chaves antes de converter para JSON, para

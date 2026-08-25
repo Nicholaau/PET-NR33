@@ -1,5 +1,5 @@
 /**
- * Service Worker do PET-Digital NR-33 v1.1.6.
+ * Service Worker do PET-Digital NR-33 v1.1.6 (hotfix 1).
  *
  * O quê: mantém offline somente os arquivos estáticos do próprio aplicativo.
  * Como: usa uma lista fechada; nunca intercepta API, Authorization, CDN, sessão ou IP.
@@ -11,7 +11,7 @@
  * - não armazena bibliotecas externas nem respostas autenticadas.
  */
 
-const CACHE_NAME = 'pet-digital-static-v1.1.6';
+const CACHE_NAME = 'pet-digital-static-v1.1.6-hotfix1';
 const APP_SHELL = [
   './',
   './index.html',
