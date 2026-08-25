@@ -1,5 +1,5 @@
 /**
- * PET-Digital NR-33 v1.1.5 — Worker/API Cloudflare comentado.
+ * PET-Digital NR-33 v1.1.6 — Worker/API Cloudflare comentado.
  *
  * O que é este arquivo?
  * - É a API backend do PET-Digital. Ele roda no Cloudflare Worker.
@@ -509,9 +509,9 @@ async function revokeDevice(request, env, deviceId) {
 
 /**
  * O quê: registra no D1 o rastro técnico completo de uma PET oficial, sem armazenar os arquivos.
- * Como: recebe temporariamente PDF + comprovante, recalcula os hashes, aplica as regras de segurança,
+ * Como: recebe temporariamente PDF + arquivo de validação (JSON), recalcula os hashes, aplica as regras de segurança,
  * confere a chave autorizada e valida as assinaturas extraídas do JSON antes de gravar metadados.
- * Quando: somente depois que o frontend já gerou os bytes finais do PDF e do comprovante técnico.
+ * Quando: somente depois que o frontend já gerou os bytes finais do PDF e do arquivo de validação da PET (JSON).
  */
 async function createPetRecord(request, env) {
   const auth = await requireAuth(request, env);
@@ -523,7 +523,7 @@ async function createPetRecord(request, env) {
     throw httpError(400, 'Chave de idempotência inválida.');
   }
   assertText(body.pdfBase64, 'Conteúdo do PDF obrigatório.');
-  if (typeof body.jsonText !== 'string' || !body.jsonText.trim()) throw httpError(400, 'Conteúdo do comprovante técnico obrigatório.');
+  if (typeof body.jsonText !== 'string' || !body.jsonText.trim()) throw httpError(400, 'Conteúdo do arquivo de validação da PET (JSON) obrigatório.');
 
   // Os arquivos chegam apenas durante esta requisição. O Worker calcula os hashes dos
   // bytes reais e extrai do JSON todos os dados de assinatura; o D1 não recebe os arquivos.
@@ -532,30 +532,30 @@ async function createPetRecord(request, env) {
   catch { throw httpError(400, 'O conteúdo Base64 do PDF é inválido.'); }
   if (!pdfBytes.length || pdfBytes.length > MAX_PDF_BYTES) throw httpError(413, `O PDF está vazio ou excede o limite de ${MAX_PDF_BYTES / 1024 / 1024} MB.`);
   const jsonBytesLength = new TextEncoder().encode(body.jsonText).length;
-  if (jsonBytesLength > MAX_DOSSIER_BYTES) throw httpError(413, `O comprovante técnico excede o limite de ${MAX_DOSSIER_BYTES / 1024 / 1024} MB.`);
+  if (jsonBytesLength > MAX_DOSSIER_BYTES) throw httpError(413, `O arquivo de validação da PET (JSON) excede o limite de ${MAX_DOSSIER_BYTES / 1024 / 1024} MB.`);
 
   const pdfHash = await sha256HexBytes(pdfBytes);
   const jsonHash = await sha256Hex(body.jsonText);
   let dossier;
   try { dossier = JSON.parse(body.jsonText); }
-  catch { throw httpError(400, 'O comprovante técnico não contém JSON válido.'); }
-  if (!dossier?.payload || !dossier?.integrity || !dossier?.fileIntegrity) throw httpError(400, 'Estrutura do comprovante técnico inválida.');
+  catch { throw httpError(400, 'O arquivo de validação da PET (JSON) não contém JSON válido.'); }
+  if (!dossier?.payload || !dossier?.integrity || !dossier?.fileIntegrity) throw httpError(400, 'Estrutura do arquivo de validação da PET (JSON) inválida.');
   assertParticipantLimits(Array.isArray(dossier.payload?.professionals) ? dossier.payload.professionals : []);
 
   const payload = dossier.payload;
   const integrity = dossier.integrity;
   assertSupportedProofStandard(payload.proofStandard, 'PET_PAYLOAD');
   const numeroPet = clean(payload?.fields?.petNumero);
-  assertText(numeroPet, 'Número da PET ausente no comprovante.');
+  assertText(numeroPet, 'Número da PET ausente no arquivo de validação (JSON).');
   const payloadHash = await sha256HexCanonical(payload);
-  if (clean(integrity.payloadHashSha256)?.toLowerCase() !== payloadHash) throw httpError(400, 'O conteúdo da PET não corresponde ao hash declarado no comprovante.');
-  if (clean(dossier.fileIntegrity.pdfSha256)?.toLowerCase() !== pdfHash) throw httpError(400, 'O comprovante técnico não corresponde ao PDF recebido.');
+  if (clean(integrity.payloadHashSha256)?.toLowerCase() !== payloadHash) throw httpError(400, 'O conteúdo da PET não corresponde ao hash declarado no arquivo de validação (JSON).');
+  if (clean(dossier.fileIntegrity.pdfSha256)?.toLowerCase() !== pdfHash) throw httpError(400, 'O arquivo de validação da PET (JSON) não corresponde ao PDF recebido.');
   const expectedRecordId = payloadHash.slice(0, 16).toUpperCase();
-  if (clean(dossier.recordId) && clean(dossier.recordId) !== expectedRecordId) throw httpError(400, 'Código de conferência do comprovante inválido.');
+  if (clean(dossier.recordId) && clean(dossier.recordId) !== expectedRecordId) throw httpError(400, 'Código de conferência do arquivo de validação (JSON) inválido.');
 
   const issuer = payload?.issuedBy || {};
   if (clean(issuer.userId) !== auth.user.id || clean(issuer.matricula) !== auth.user.matricula) {
-    throw httpError(403, 'O usuário autenticado não corresponde ao emissor gravado no comprovante.');
+    throw httpError(403, 'O usuário autenticado não corresponde ao emissor gravado no arquivo de validação (JSON).');
   }
 
   const petSignature = integrity.supervisorCryptographicSignature || {};
@@ -569,7 +569,7 @@ async function createPetRecord(request, env) {
   assertSupportedProofStandard(proof.proofStandard, 'PDF_GENERATION_PROOF');
   const pdfProofHash = await sha256HexCanonical(pdfProofHashInput(proof));
   if (clean(proof.pdfProofHashSha256)?.toLowerCase() !== pdfProofHash) throw httpError(400, 'A prova de geração do PDF não corresponde ao hash declarado.');
-  if (clean(integrity.latestPdfProofHashSha256)?.toLowerCase() !== pdfProofHash) throw httpError(400, 'O comprovante não referencia corretamente a última prova de PDF.');
+  if (clean(integrity.latestPdfProofHashSha256)?.toLowerCase() !== pdfProofHash) throw httpError(400, 'O arquivo de validação (JSON) não referencia corretamente a última prova de PDF.');
   if (clean(proof.payloadHashSha256)?.toLowerCase() !== payloadHash || clean(proof.petNumero) !== numeroPet) {
     throw httpError(400, 'A prova de geração do PDF não está vinculada a esta PET.');
   }
@@ -738,7 +738,7 @@ async function validateHash(request, env) {
 }
 
 /**
- * O quê: valida um comprovante técnico importado sem confiar na chave contida no próprio arquivo.
+ * O quê: valida um arquivo de validação da PET (JSON) importado sem confiar na chave contida no próprio arquivo.
  * Como: exige coincidência simultânea de número, hash do payload, hash real do JSON, hash do PDF,
  * emissor e dispositivo previamente autorizado no registro do servidor.
  * Quando: a aba Validar envia os dados recalculados do arquivo recebido.
@@ -747,7 +747,7 @@ async function validateDocument(request, env) {
   const auth = await requireRole(request, env, ['admin', 'gestor', 'verificador']);
   const body = await readJson(request, MAX_PET_REQUEST_BYTES);
   assertText(body.pdfBase64, 'Conteúdo do PDF obrigatório para validação oficial.');
-  if (typeof body.jsonText !== 'string' || !body.jsonText.trim()) throw httpError(400, 'Comprovante técnico obrigatório para validação oficial.');
+  if (typeof body.jsonText !== 'string' || !body.jsonText.trim()) throw httpError(400, 'Arquivo de validação da PET (JSON) obrigatório para validação oficial.');
 
   // O Worker recalcula os hashes dos arquivos recebidos. Assim, a validação não depende
   // de valores informados pelo frontend nem da chave pública incorporada ao próprio JSON.
@@ -756,34 +756,34 @@ async function validateDocument(request, env) {
   catch { throw httpError(400, 'O conteúdo Base64 do PDF é inválido.'); }
   if (!pdfBytes.length || pdfBytes.length > MAX_PDF_BYTES) throw httpError(413, `O PDF está vazio ou excede ${MAX_PDF_BYTES / 1024 / 1024} MB.`);
   const jsonBytesLength = new TextEncoder().encode(body.jsonText).length;
-  if (jsonBytesLength > MAX_DOSSIER_BYTES) throw httpError(413, `O comprovante técnico excede ${MAX_DOSSIER_BYTES / 1024 / 1024} MB.`);
+  if (jsonBytesLength > MAX_DOSSIER_BYTES) throw httpError(413, `O arquivo de validação da PET (JSON) excede ${MAX_DOSSIER_BYTES / 1024 / 1024} MB.`);
 
   const pdfHash = await sha256HexBytes(pdfBytes);
   const jsonHash = await sha256Hex(body.jsonText);
   let dossier;
   try { dossier = JSON.parse(body.jsonText); }
-  catch { throw httpError(400, 'O comprovante técnico não contém JSON válido.'); }
-  if (!dossier?.payload || !dossier?.integrity || !dossier?.fileIntegrity) throw httpError(400, 'Estrutura do comprovante técnico inválida.');
+  catch { throw httpError(400, 'O arquivo de validação da PET (JSON) não contém JSON válido.'); }
+  if (!dossier?.payload || !dossier?.integrity || !dossier?.fileIntegrity) throw httpError(400, 'Estrutura do arquivo de validação da PET (JSON) inválida.');
   assertParticipantLimits(Array.isArray(dossier.payload?.professionals) ? dossier.payload.professionals : []);
   assertSupportedProofStandard(dossier.payload.proofStandard, 'PET_PAYLOAD');
 
   const numeroPet = clean(dossier.payload?.fields?.petNumero);
-  assertText(numeroPet, 'Número da PET ausente no comprovante.');
+  assertText(numeroPet, 'Número da PET ausente no arquivo de validação (JSON).');
   const payloadHash = await sha256HexCanonical(dossier.payload);
-  if (clean(dossier.integrity?.payloadHashSha256)?.toLowerCase() !== payloadHash) throw httpError(400, 'O conteúdo do comprovante foi alterado: hash do payload não confere.');
-  if (clean(dossier.fileIntegrity?.pdfSha256)?.toLowerCase() !== pdfHash) throw httpError(400, 'O PDF selecionado não corresponde ao comprovante técnico.');
+  if (clean(dossier.integrity?.payloadHashSha256)?.toLowerCase() !== payloadHash) throw httpError(400, 'O conteúdo do arquivo de validação (JSON) foi alterado: hash do payload não confere.');
+  if (clean(dossier.fileIntegrity?.pdfSha256)?.toLowerCase() !== pdfHash) throw httpError(400, 'O PDF selecionado não corresponde ao arquivo de validação da PET (JSON).');
 
   const petSignature = dossier.integrity?.supervisorCryptographicSignature || {};
-  const publicKeyHash = requiredHash(petSignature.publicKeyHash, 'Código do dispositivo ausente ou inválido no comprovante.');
-  assertText(petSignature.signatureBase64, 'Assinatura técnica da PET ausente no comprovante.');
+  const publicKeyHash = requiredHash(petSignature.publicKeyHash, 'Código do dispositivo ausente ou inválido no arquivo de validação (JSON).');
+  assertText(petSignature.signatureBase64, 'Assinatura técnica da PET ausente no arquivo de validação (JSON).');
   const issuerUserId = clean(dossier.payload?.issuedBy?.userId);
   const issuerMatricula = clean(dossier.payload?.issuedBy?.matricula);
-  assertText(issuerUserId, 'Identificação do emissor ausente no comprovante.');
-  assertText(issuerMatricula, 'Matrícula do emissor ausente no comprovante.');
+  assertText(issuerUserId, 'Identificação do emissor ausente no arquivo de validação (JSON).');
+  assertText(issuerMatricula, 'Matrícula do emissor ausente no arquivo de validação (JSON).');
 
   const proofs = Array.isArray(dossier.integrity?.pdfGenerationProofs) ? dossier.integrity.pdfGenerationProofs : [];
   const proof = proofs[proofs.length - 1];
-  if (!proof) throw httpError(400, 'Comprovante sem prova de geração do PDF.');
+  if (!proof) throw httpError(400, 'Arquivo de validação (JSON) sem prova de geração do PDF.');
   assertSupportedProofStandard(proof.proofStandard, 'PDF_GENERATION_PROOF');
   const proofHash = await sha256HexCanonical(pdfProofHashInput(proof));
   if (clean(proof.pdfProofHashSha256)?.toLowerCase() !== proofHash || clean(proof.payloadHashSha256)?.toLowerCase() !== payloadHash || clean(proof.petNumero) !== numeroPet) {
@@ -839,7 +839,7 @@ async function validateDocument(request, env) {
     issuer: { userId: record.created_by_user_id, name: record.created_by_name, matricula: record.created_by_matricula },
     calculated: { payloadHash, pdfHash, jsonHash, proofHash },
     message: valid
-      ? 'PDF e comprovante confirmados no servidor, com emissor, dispositivo e assinaturas válidos.'
+      ? 'PDF e arquivo de validação (JSON) confirmados no servidor, com emissor, dispositivo e assinaturas válidos.'
       : 'Registro encontrado, mas uma das verificações de autorização ou assinatura falhou.'
   });
 }
@@ -1066,8 +1066,7 @@ async function verifyEcdsaSignature(publicKeyJwk, messageHashHex, signatureBase6
 }
 
 /** Regras de N/A compartilhadas com o frontend. */
-const MAX_NA_ITEMS = 5;
-const NA_FORBIDDEN_ITEMS = new Set(['01','02','03','05','06','08','10','11','12','14','16','17','18','22']);
+const NA_CRITICAL_ITEMS = new Set(['01','02','03','05','06','08','10','11','12','14','16','17','18','22']);
 
 /**
  * O quê: valida no servidor as condições mínimas de segurança contidas no payload assinado.
@@ -1077,7 +1076,7 @@ const NA_FORBIDDEN_ITEMS = new Set(['01','02','03','05','06','08','10','11','12'
 /**
  * O quê: impede que o próprio arquivo escolha algoritmos arbitrários.
  * Como: aceita somente os perfis conhecidos e os algoritmos fixados no código do Worker.
- * Quando: registro e validação oficial de qualquer comprovante.
+ * Quando: registro e validação oficial de qualquer arquivo de validação.
  */
 function assertSupportedProofStandard(standard, expectedScope) {
   if (!standard || typeof standard !== 'object') throw httpError(400, 'Padrão técnico de validação ausente.');
@@ -1128,19 +1127,17 @@ async function validatePetPayloadSafety(payload) {
     if (!['S','N','NA'].includes(c?.answer)) errors.push(`Item ${number} sem resposta válida.`);
     if (c?.answer === 'NA') {
       naCount++;
-      if (NA_FORBIDDEN_ITEMS.has(number)) errors.push(`Item ${number} é crítico e não aceita N/A.`);
+      if (NA_CRITICAL_ITEMS.has(number)) errors.push(`Item ${number} é crítico: N/A foi registrado, mas impede a emissão oficial até revisão.`);
       if (clean(c.justification || '').length < 10) errors.push(`Item ${number} marcado N/A sem justificativa suficiente.`);
     }
   }
-  if (naCount > MAX_NA_ITEMS) errors.push(`Quantidade de itens N/A acima do limite (${MAX_NA_ITEMS}).`);
 
   const answer = n => checklist.find(c => String(c.number).padStart(2, '0') === n)?.answer;
   const negativeBlocking = checklist.filter(c => c.answer === 'N' && !['12','15','20'].includes(String(c.number).padStart(2, '0')));
   if (negativeBlocking.length) errors.push('Há item de controle impeditivo marcado como NÃO.');
-  if (answer('12') !== 'N') errors.push('O item 12 deve confirmar que a atmosfera NÃO está IPVS.');
+  if (answer('12') === 'S') errors.push('O item 12 informa atmosfera IPVS; a entrada não pode ser autorizada.');
   if (answer('15') === 'S' && answer('19') !== 'S') errors.push('Ar mandado necessário sem linha de ar instalada e operando.');
 
-  if (answer('10') !== 'S') errors.push('A calibração atualizada do detector deve ser confirmada no item 10.');
   if (!clean(fields.detectorId)) errors.push('Identificador do detector obrigatório.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(clean(fields.detectorCalibracao) || '')) errors.push('Data de calibração/validade do detector obrigatória.');
   const referenceDate = clean(fields.data) || nowIso().slice(0, 10);
@@ -1177,26 +1174,41 @@ async function validatePetPayloadSafety(payload) {
 /** Valida valores numéricos das medições, inclusive a proibição de negativos. */
 function validateGasFields(fields) {
   const errors = [];
-  const number = (name, required) => {
+  const parse = name => {
     const raw = clean(fields[name]);
-    if (!raw) { if (required) errors.push(`${name} obrigatório.`); return null; }
+    if (!raw) return null;
     const value = Number(String(raw).replace(',', '.'));
     if (!Number.isFinite(value)) { errors.push(`${name} inválido.`); return null; }
     if (value < 0) errors.push(`${name} não pode ser negativo.`);
     return value;
   };
-  for (const [prefix, required] of [['gas_inicial', true], ['gas_ventilacao', false]]) {
-    const hasAny = required || ['hora','o2','lie','h2s','co','obs'].some(k => clean(fields[`${prefix}_${k}`]));
-    if (!hasAny) continue;
-    if (!clean(fields[`${prefix}_hora`])) errors.push(`${prefix}_hora obrigatório.`);
-    const o2 = number(`${prefix}_o2`, true);
-    const lie = number(`${prefix}_lie`, true);
-    const h2s = number(`${prefix}_h2s`, true);
-    const co = number(`${prefix}_co`, true);
-    if (o2 != null && !(o2 > 19.5 && o2 < 23)) errors.push(`${prefix}: O2 fora do intervalo seguro.`);
-    if (lie != null && !(lie < 10)) errors.push(`${prefix}: LIE fora do limite seguro.`);
-    if (h2s != null && !(h2s < 5)) errors.push(`${prefix}: H2S fora do limite seguro.`);
-    if (co != null && !(co < 25)) errors.push(`${prefix}: CO fora do limite seguro.`);
+  const evaluate = (prefix, required) => {
+    const any = required || ['hora','o2','lie','h2s','co','obs'].some(k => clean(fields[`${prefix}_${k}`]));
+    if (!any) return { present: false, complete: false, safe: false };
+    let complete = true;
+    if (!clean(fields[`${prefix}_hora`])) { errors.push(`${prefix}_hora obrigatório.`); complete = false; }
+    const values = {
+      o2: parse(`${prefix}_o2`),
+      lie: parse(`${prefix}_lie`),
+      h2s: parse(`${prefix}_h2s`),
+      co: parse(`${prefix}_co`)
+    };
+    for (const [key,value] of Object.entries(values)) {
+      if (value == null) { errors.push(`${prefix}_${key} obrigatório.`); complete = false; }
+    }
+    const safe = complete && values.o2 > 19.5 && values.o2 < 23 && values.lie < 10 && values.h2s < 5 && values.co < 25;
+    return { present: true, complete, safe };
+  };
+
+  const initial = evaluate('gas_inicial', true);
+  const ventilationStarted = ['hora','o2','lie','h2s','co','obs'].some(k => clean(fields[`gas_ventilacao_${k}`]));
+  const after = evaluate('gas_ventilacao', !initial.safe || ventilationStarted);
+
+  if (initial.complete && !initial.safe) {
+    if (!after.present || !after.complete) errors.push('Medição inicial fora dos limites: o teste após ventilação deve estar completo.');
+    else if (!after.safe) errors.push('O teste após ventilação permanece fora dos limites seguros.');
+  } else if (after.present && after.complete && !after.safe) {
+    errors.push('O teste após ventilação está fora dos limites seguros.');
   }
   return errors;
 }

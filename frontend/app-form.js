@@ -1,6 +1,6 @@
 'use strict';
 /**
- * PET-Digital v1.1.5 — formulário e emissão.
+ * PET-Digital v1.1.6 — formulário e emissão.
  * O quê: fotos, assinaturas, checklist, medições, etapas, validação e finalização.
  * Como: coleta o formulário, aplica regras locais e prepara o dossiê assinado.
  * Quando: preenchimento e finalização da PET.
@@ -260,21 +260,54 @@ function latestPdfProof(record) {
   return proofs.length ? proofs[proofs.length - 1] : null;
 }
 
+
+/**
+ * Normaliza registros criados por tentativas anteriores antes de continuar uma emissão.
+ * O quê: garante que objetos/arrays obrigatórios existam, inclusive `pdfGenerationProofs`.
+ * Como: corrige somente a estrutura em memória; não inventa hashes, assinaturas nem arquivos.
+ * Quando: ao reutilizar uma tentativa interrompida ou carregar registro de versão anterior.
+ */
+function normalizeFinalizationRecordStructure(record) {
+  if (!record || typeof record !== 'object') return null;
+  if (!record.integrity || typeof record.integrity !== 'object') record.integrity = {};
+  if (!Array.isArray(record.integrity.pdfGenerationProofs)) record.integrity.pdfGenerationProofs = [];
+  if (!record.idempotencyKey) record.idempotencyKey = crypto.randomUUID();
+  return record;
+}
+
+/**
+ * Confere se uma tentativa realmente pode ser reenviada ao servidor.
+ * O quê: exige PDF + JSON + hashes de saída antes de marcar uma PET como pendente.
+ * Como: consulta o IndexedDB e compara a existência dos artefatos com `record.output`.
+ * Quando: após erro de rede/servidor e antes de exibir “Repetir registro pendente”.
+ */
+async function hasCompletePendingArtifacts(record) {
+  const normalized = normalizeFinalizationRecordStructure(record);
+  if (!normalized?.recordId || !normalized.output?.pdfHashSha256 || !normalized.output?.jsonHashSha256) return false;
+  try {
+    const files = await readOfficialFiles(normalized);
+    return Boolean(files?.pdfFile && files?.jsonText);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Renderiza o checklist e um campo de justificativa para cada resposta N/A.
- * O campo fica oculto até N/A ser escolhido; itens críticos não permitem N/A.
+ * O campo fica oculto até N/A ser escolhido; itens críticos aceitam o registro, mas bloqueiam a emissão oficial até revisão.
  */
 function renderChecklist() {
+  const container = $('#checklistCards');
   const tbody = $('#checklistTable tbody');
-  tbody.innerHTML = checklistItems.map((item, index) => {
+  const htmlRows = checklistItems.map((item, index) => {
     const n = String(index + 1).padStart(2, '0');
-    const naDisabled = NA_FORBIDDEN_ITEMS.has(n);
+    const critical = NA_CRITICAL_ITEMS.has(n);
     return `<tr data-check-row="${n}">
       <td>${n}</td>
-      <td>${escapeHtml(item)}${naDisabled ? '<br><small class="critical-note">Item crítico: N/A não permitido.</small>' : ''}</td>
-      <td><input required type="radio" name="check_${n}" value="S" aria-label="${n} Sim" /></td>
-      <td><input required type="radio" name="check_${n}" value="N" aria-label="${n} Não" /></td>
-      <td><input required type="radio" name="check_${n}" value="NA" aria-label="${n} Não se aplica" ${naDisabled ? 'disabled' : ''} /></td>
+      <td>${escapeHtml(item)}${critical ? '<br><small class="critical-note">Se N/A for necessário, justifique. Em item crítico, a emissão oficial ficará bloqueada até revisão.</small>' : ''}</td>
+      <td><input required type="radio" name="check_${n}" value="S" aria-label="Item ${n}: Sim" /></td>
+      <td><input required type="radio" name="check_${n}" value="N" aria-label="Item ${n}: Não" /></td>
+      <td><input required type="radio" name="check_${n}" value="NA" aria-label="Item ${n}: Não se aplica" /></td>
     </tr>
     <tr class="na-justification-row hidden" data-na-row="${n}">
       <td></td><td colspan="4"><label>Justificativa do N/A — item ${n}
@@ -282,16 +315,54 @@ function renderChecklist() {
       </label></td>
     </tr>`;
   }).join('');
+  if (tbody) tbody.innerHTML = htmlRows;
+
+  // Em telas pequenas, cartões são mais legíveis que uma tabela de 5 colunas.
+  // Os mesmos inputs continuam sendo usados, portanto rascunho, validação e payload não mudam.
+  if (container) {
+    container.innerHTML = checklistItems.map((item, index) => {
+      const n = String(index + 1).padStart(2, '0');
+      const critical = NA_CRITICAL_ITEMS.has(n);
+      return `<fieldset class="check-card" data-check-card="${n}">
+        <legend><span class="check-number">${n}</span> ${escapeHtml(item)}</legend>
+        ${critical ? '<p class="critical-note">N/A pode ser registrado com justificativa, mas este item precisa ser revisto antes da emissão oficial.</p>' : ''}
+        <div class="check-options" role="radiogroup" aria-label="Resposta do item ${n}">
+          <label><input required type="radio" name="check_mobile_${n}" value="S" data-check-mobile="${n}" /> <span>Sim</span></label>
+          <label><input required type="radio" name="check_mobile_${n}" value="N" data-check-mobile="${n}" /> <span>Não</span></label>
+          <label><input required type="radio" name="check_mobile_${n}" value="NA" data-check-mobile="${n}" /> <span>N/A</span></label>
+        </div>
+        <label class="na-justification-mobile hidden" data-na-card="${n}">Justificativa do N/A
+          <input data-check-mobile-justification="${n}" minlength="10" maxlength="300" placeholder="Explique por que o item não se aplica" />
+        </label>
+      </fieldset>`;
+    }).join('');
+  }
 }
+
 
 /** Mostra/oculta a justificativa do N/A conforme a resposta selecionada. */
 function updateNaJustificationVisibility(number) {
   const selected = $(`input[name="check_${number}"]:checked`);
   const row = $(`[data-na-row="${number}"]`);
   const input = $(`[name="check_${number}_justification"]`);
+  const mobileRow = $(`[data-na-card="${number}"]`);
+  const mobileInput = $(`[data-check-mobile-justification="${number}"]`);
   const active = selected?.value === 'NA';
   row?.classList.toggle('hidden', !active);
-  if (input) { input.required = active; if (!active) input.value = ''; }
+  mobileRow?.classList.toggle('hidden', !active);
+  if (input) {
+    input.required = active;
+    if (!active) input.value = '';
+  }
+  if (mobileInput) {
+    mobileInput.required = active;
+    mobileInput.value = input?.value || '';
+  }
+  // Mantém o cartão móvel espelhado quando o valor foi restaurado de rascunho/desktop.
+  if (selected) {
+    const mobile = $(`[data-check-mobile="${number}"][value="${selected.value}"]`);
+    if (mobile) mobile.checked = true;
+  }
 }
 
 /**
@@ -377,12 +448,28 @@ function addProfessional(type) {
  * O que faz: monta o HTML de cada pessoa, exibe foto/status, cria canvas de assinatura
  * e recarrega a assinatura já salva quando existir.
  */
+/**
+ * Atualiza a identificação visual do supervisor usando o cartão da equipe.
+ * O quê: elimina a digitação duplicada do nome do supervisor.
+ * Como: lê a pessoa `type=supervisor` e apresenta nome/matrícula na etapa Identificação.
+ * Quando: renderização da equipe e qualquer alteração de nome/matrícula do supervisor.
+ */
+function updateSupervisorAutoDisplay() {
+  const supervisor = people.find(person => person.type === 'supervisor');
+  const label = $('#supervisorAutoLabel');
+  if (!label) return;
+  const nome = normalizeText(supervisor?.nome);
+  const matricula = normalizeText(supervisor?.matricula);
+  label.textContent = nome ? `${nome}${matricula ? ` — matrícula ${matricula}` : ''}` : 'Será preenchido automaticamente com o supervisor informado na etapa “Equipe”.';
+}
+
 function renderPeople() {
   const list = $('#peopleList');
   list.innerHTML = '';
   people.forEach(person => {
     const div = document.createElement('div');
     div.className = 'person-card';
+    div.tabIndex = -1;
     div.dataset.personId = person.id;
     div.innerHTML = `
       <div class="person-head">
@@ -433,6 +520,7 @@ function renderPeople() {
       img.src = person.signatureDataUrl;
     }
   });
+  updateSupervisorAutoDisplay();
 }
 
 /**
@@ -495,7 +583,7 @@ function setupCanvas(canvas, person) {
 /**
  * Invalida a PET finalizada quando o formulário é alterado depois da assinatura.
  * Ativação: edição de campos, foto, assinatura ou inclusão/remoção de profissionais.
- * O que faz: desabilita PDF/comprovante técnico da finalização anterior para evitar que o usuário
+ * O que faz: desabilita PDF/arquivo de validação (JSON) da finalização anterior para evitar que o usuário
  * compartilhe um dossiê antigo após ter modificado dados na tela.
  */
 function markFinalizedRecordStale() {
@@ -519,7 +607,7 @@ function markFinalizedRecordStale() {
   const box = $('#validationBox');
   if (box) {
     box.className = 'validation-box warn';
-    box.textContent = 'O formulário foi alterado após a última finalização. Valide e finalize novamente para gerar PDF/comprovante técnico atualizados.';
+    box.textContent = 'O formulário foi alterado após a última finalização. Valide e finalize novamente para gerar PDF/arquivo de validação (JSON) atualizados.';
   }
 }
 
@@ -541,6 +629,7 @@ function bindEvents() {
     if (!card || !event.target.dataset.field) return;
     const person = people.find(p => p.id === card.dataset.personId);
     if (person) person[event.target.dataset.field] = event.target.value;
+    updateSupervisorAutoDisplay();
     markFinalizedRecordStale();
     autoSaveDraft();
   });
@@ -615,10 +704,34 @@ function bindEvents() {
     }
   });
 
-  // N/A exige justificativa e é limitado a itens não críticos.
-  $('#checklistTable').addEventListener('change', event => {
+  // Checklist: desktop e móvel espelham a mesma resposta. O usuário pode selecionar S/N/N/A;
+  // o avanço exige resposta, e a segurança é analisada antes da emissão oficial.
+  $('#checklistTable')?.addEventListener('change', event => {
     const match = event.target.name?.match(/^check_(\d{2})$/);
-    if (match) updateNaJustificationVisibility(match[1]);
+    if (!match) return;
+    const number = match[1];
+    const mobile = $(`[data-check-mobile="${number}"][value="${event.target.value}"]`);
+    if (mobile) mobile.checked = true;
+    updateNaJustificationVisibility(number);
+  });
+  $('#checklistTable')?.addEventListener('input', event => {
+    const match = event.target.name?.match(/^check_(\d{2})_justification$/);
+    if (!match) return;
+    const mobile = $(`[data-check-mobile-justification="${match[1]}"]`);
+    if (mobile) mobile.value = event.target.value;
+  });
+  $('#checklistCards')?.addEventListener('change', event => {
+    const number = event.target.dataset.checkMobile;
+    if (!number) return;
+    const desktop = $(`input[name="check_${number}"][value="${event.target.value}"]`);
+    if (desktop) desktop.checked = true;
+    updateNaJustificationVisibility(number);
+  });
+  $('#checklistCards')?.addEventListener('input', event => {
+    const number = event.target.dataset.checkMobileJustification;
+    if (!number) return;
+    const desktop = $(`[name="check_${number}_justification"]`);
+    if (desktop) desktop.value = event.target.value;
   });
 
   // Botões principais do formulário e ações de rascunho/finalização/exportação.
@@ -640,7 +753,7 @@ function bindEvents() {
     resetPeople();
     renderPeople();
     $('#validationBox').className = 'validation-box';
-    $('#validationBox').textContent = 'Preencha o formulário e clique em “Validar”. Para finalizar e gerar os documentos oficiais, é necessário estar logado e com o dispositivo autorizado.';
+    $('#validationBox').textContent = 'Preencha as etapas em sequência. Cada etapa será conferida ao avançar; a emissão oficial exige login e dispositivo autorizado.';
     $('#integrityPanel').classList.add('hidden');
     $('#finalizeBtn').disabled = false;
     $('#finalizeBtn').textContent = 'Finalizar PET oficial';
@@ -654,19 +767,13 @@ function bindEvents() {
     $('#storageNotice')?.classList.add('hidden');
   });
 
-  $('#validateBtn').addEventListener('click', () => {
-    const result = validateCurrentForm();
-    showValidation(result);
-    if (!result.ok) focusFirstFormIssue(result);
-  });
-
   $('#finalizeBtn').addEventListener('click', finalizeRecord);
   $('#registerServerBtn').addEventListener('click', event => retryPendingRecordRegistration(finalizedRecord, event.currentTarget));
   $('#printBtn').addEventListener('click', event => openOfficialPdf(finalizedRecord, event.currentTarget));
   $('#sharePdfBtn').addEventListener('click', event => sharePdfRecord(finalizedRecord, event.currentTarget));
   $('#exportBtn').addEventListener('click', async () => {
     if (!finalizedRecord) return;
-    const ready = await ensureRecordReadyForOutput(finalizedRecord, 'salvar o comprovante técnico');
+    const ready = await ensureRecordReadyForOutput(finalizedRecord, 'salvar o arquivo de validação da PET (JSON)');
     if (!ready) return;
     const files = await readOfficialFiles(finalizedRecord);
     if (files?.jsonText) downloadBlob(new Blob([files.jsonText], { type: 'application/json' }), files.jsonFilename || jsonFilename(finalizedRecord));
@@ -714,14 +821,9 @@ function bindEvents() {
   });
 
   $('#formPrevBtn')?.addEventListener('click', () => showFormStep(currentFormStep - 1, { focus: true }));
-  $('#formNextBtn')?.addEventListener('click', () => showFormStep(currentFormStep + 1, { focus: true }));
-  $('#formStepButtons')?.addEventListener('click', event => {
-    const button = event.target.closest('[data-form-step-target]');
-    if (button) showFormStep(Number(button.dataset.formStepTarget), { focus: true });
-  });
-
+  $('#formNextBtn')?.addEventListener('click', () => goToNextFormStep());
   // Autosave com debounce para evitar perda de preenchimento durante o uso em campo.
-  // Qualquer alteração após finalizar invalida os botões PDF/comprovante técnico até nova finalização.
+  // Qualquer alteração após finalizar invalida os botões PDF/arquivo de validação (JSON) até nova finalização.
   const handleFormEdited = debounce(() => {
     markFinalizedRecordStale();
     autoSaveDraft();
@@ -747,9 +849,16 @@ function showTab(tabId) {
   $$('.tab').forEach(t => t.classList.remove('active'));
   const target = $('#' + tabId) || $('#formTab');
   target.classList.add('active');
-  if (tabId === 'recordsTab') renderRecords();
-  if (tabId === 'systemTab') { renderAuthState(); refreshMe(); refreshDevices(true); if (['admin','gestor'].includes((authState || loadAuthState())?.user?.role)) refreshUsers(); }
+  // Mostra visualmente qual área está aberta e informa `aria-current` a tecnologias assistivas.
+  $$('#appTopbar [data-tab]').forEach(button => {
+    const active = button.dataset.tab === target.id;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-current', active ? 'page' : 'false');
+  });
+  if (target.id === 'recordsTab') renderRecords();
+  if (target.id === 'systemTab') { renderAuthState(); refreshMe(); refreshDevices(true); if (['admin','gestor'].includes((authState || loadAuthState())?.user?.role)) refreshUsers(); }
 }
+
 
 /**
  * Preenche data e hora padrão sem sobrescrever valores existentes.
@@ -760,19 +869,18 @@ function showFormStep(step, options = {}) {
   const normalized = Math.min(FORM_STEPS.length, Math.max(1, Number(step) || 1));
   currentFormStep = normalized;
   $$('[data-form-step]').forEach(section => section.classList.toggle('form-step-hidden', Number(section.dataset.formStep) !== normalized));
-  $$('[data-form-step-target]').forEach(button => {
-    const active = Number(button.dataset.formStepTarget) === normalized;
-    button.classList.toggle('active', active);
-    button.setAttribute('aria-current', active ? 'step' : 'false');
-  });
   const progress = $('#formProgressBar');
-  if (progress) progress.value = normalized;
+  if (progress) { progress.value = normalized; progress.textContent = `${normalized} de ${FORM_STEPS.length}`; }
   const label = $('#formProgressLabel');
   if (label) label.textContent = `Etapa ${normalized} de ${FORM_STEPS.length}: ${FORM_STEPS[normalized - 1].label}`;
+  const counter = $('#formStepCounter');
+  if (counter) counter.textContent = `${normalized} / ${FORM_STEPS.length}`;
   const prev = $('#formPrevBtn');
   const next = $('#formNextBtn');
   if (prev) prev.disabled = normalized === 1;
-  if (next) { next.disabled = normalized === FORM_STEPS.length; next.textContent = normalized === FORM_STEPS.length ? 'Última etapa' : 'Próxima etapa'; }
+  if (next) { next.disabled = normalized === FORM_STEPS.length; next.textContent = normalized === FORM_STEPS.length ? 'Concluir abaixo' : 'Próxima etapa'; }
+  const stepBox = $('#stepValidationBox');
+  if (stepBox && !options.keepMessage) { stepBox.className = 'step-validation hidden'; stepBox.textContent = ''; }
   if (options.focus) {
     const target = $(`[data-form-step="${normalized}"]`);
     target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -780,32 +888,33 @@ function showFormStep(step, options = {}) {
   }
 }
 
-function stepForElement(element) {
-  return Number(element?.closest?.('[data-form-step]')?.dataset.formStep || 1);
-}
-
-function focusFirstFormIssue(result = {}) {
-  const form = $('#petForm');
-  let target = result.firstInvalid || form.querySelector(':invalid');
-  if (!target) {
-    const unanswered = $$('#checklistTable tbody tr').find(row => !row.querySelector('input[type="radio"]:checked'));
-    target = unanswered?.querySelector('input') || null;
+/** Exibe erros/alertas da etapa atual sem obrigar o usuário a esperar a finalização. */
+function showStepValidation(result) {
+  const box = $('#stepValidationBox');
+  if (!box) return;
+  if ((!result.errors?.length) && (!result.warnings?.length)) {
+    box.className = 'step-validation ok';
+    box.textContent = 'Etapa conferida. Você pode continuar.';
+    return;
   }
-  if (!target && result.errors?.some(error => /participante|entrante|vigia|supervisor|matrícula|foto|assinatura/i.test(error))) target = $('#peopleList');
-  if (!target && result.errors?.some(error => /gás|atmosfera|O₂|LIE|H₂S|CO/i.test(error))) target = $('#gasTable input');
-  if (!target) target = $('#validationBox');
-  showFormStep(stepForElement(target), { focus: false });
-  setTimeout(() => {
-    target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    if (typeof target?.focus === 'function') target.focus({ preventScroll: true });
-  }, 60);
+  box.className = 'step-validation ' + (result.errors?.length ? 'bad' : 'warn');
+  const text = [];
+  if (result.errors?.length) text.push('Corrija antes de continuar:\n- ' + result.errors.join('\n- '));
+  if (result.warnings?.length) text.push('Atenção:\n- ' + result.warnings.join('\n- '));
+  box.textContent = text.join('\n');
 }
 
-function setDefaultDateTime() {
-  const form = $('#petForm');
-  if (!form.elements.data.value) form.elements.data.value = todayISO();
-  if (!form.elements.horaEmissao.value) form.elements.horaEmissao.value = nowTime();
+/** Valida a etapa atual e só então avança para a próxima. */
+function goToNextFormStep() {
+  const result = validateFormStep(currentFormStep, { finalSafety: false });
+  showStepValidation(result);
+  if (!result.ok) {
+    focusFirstFormIssue(result);
+    return;
+  }
+  showFormStep(currentFormStep + 1, { focus: true });
 }
+
 
 /**
  * Coleta os campos gerais do formulário.
@@ -814,18 +923,23 @@ function setDefaultDateTime() {
  * textos e acrescenta userAgent, versão do app e data/hora da coleta.
  */
 function collectFormFields() {
+  syncPeopleFromInputs();
   const form = $('#petForm');
   const data = new FormData(form);
   const fields = {};
   for (const [key, value] of data.entries()) {
-    if (key.startsWith('check_')) continue;
+    if (key.startsWith('check_') || key.startsWith('check_mobile_')) continue;
     fields[key] = normalizeText(value);
   }
+  const supervisor = people.find(person => person.type === 'supervisor');
+  fields.supervisorEntrada = normalizeText(supervisor?.nome);
+  fields.supervisorMatricula = normalizeText(supervisor?.matricula);
   fields.userAgent = navigator.userAgent;
   fields.appVersion = APP_VERSION;
   fields.collectedAt = new Date().toISOString();
   return fields;
 }
+
 
 /**
  * Coleta as respostas do checklist.
@@ -911,49 +1025,102 @@ function buildPayload(existingPetNumber = '') {
     professionals: collectPeople(),
     regulatoryNotice: {
       nr33: 'Permissão de Entrada e Trabalho para espaços confinados; registros devem ser mantidos pela organização.',
-      validationCriteria: 'O2 > 19,5 e < 23; LIE < 10; H2S < 5 ppm; CO < 25 ppm; checklist sem impeditivos; N/A limitado e justificado.'
+      validationCriteria: 'O2 > 19,5 e < 23; LIE < 10; H2S < 5 ppm; CO < 25 ppm; todos os itens do checklist respondidos; N/A justificado; condições inseguras impedem a emissão oficial.'
     }
   };
 }
 
-/** Executa todas as regras impeditivas antes da emissão oficial. */
-function validateCurrentForm() {
-  syncPeopleFromInputs();
-  const form = $('#petForm');
+/** Valida somente os campos HTML obrigatórios que pertencem a uma etapa. */
+function validateRequiredFieldsInStep(step) {
+  const section = $(`[data-form-step="${step}"]`);
+  const errors = [];
+  let firstInvalid = null;
+  if (!section) return { errors, firstInvalid };
+  $$('input[required], textarea[required], select[required]', section).forEach(element => {
+    // Os radios móveis espelham o checklist desktop e não devem duplicar a validação nativa.
+    if (element.name?.startsWith('check_mobile_')) return;
+    if (!element.checkValidity()) {
+      if (!firstInvalid) firstInvalid = element;
+      const label = element.getAttribute('aria-label') || element.closest('label')?.firstChild?.textContent?.trim() || element.name || 'campo obrigatório';
+      errors.push(`Preencha corretamente: ${label}.`);
+    }
+  });
+  return { errors, firstInvalid };
+}
+
+/** Retorna o controle de checklist visível no dispositivo para levar o usuário ao erro certo. */
+function checklistIssueTarget(number, kind = 'radio') {
+  const mobile = window.matchMedia?.('(max-width: 760px)')?.matches;
+  if (kind === 'justification') {
+    return mobile ? $(`[data-check-mobile-justification="${number}"]`) : $(`[name="check_${number}_justification"]`);
+  }
+  return mobile ? $(`[data-check-mobile="${number}"]`) : $(`input[name="check_${number}"]`);
+}
+
+/** Valida o checklist; respostas reais são registráveis, mas a segurança só bloqueia na emissão oficial. */
+function validateChecklistSection({ finalSafety = false } = {}) {
+  const checklist = collectChecklist();
   const errors = [];
   const warnings = [];
-
-  if (!form.checkValidity()) {
-    errors.push('Há campos obrigatórios não preenchidos.');
-    const first = form.querySelector(':invalid');
-    if (first) errors.push(`Verifique o campo: ${first.name || first.dataset?.field || first.getAttribute('aria-label') || first.type}.`);
-  }
-
-  const checklist = collectChecklist();
-  checklist.forEach(c => { if (!c.answer) errors.push(`Checklist item ${c.number} sem resposta.`); });
-  const naItems = checklist.filter(c => c.answer === 'NA');
-  if (naItems.length > MAX_NA_ITEMS) errors.push(`Use N/A somente quando indispensável. Limite: ${MAX_NA_ITEMS} itens; informado: ${naItems.length}.`);
-  naItems.forEach(c => {
-    if (NA_FORBIDDEN_ITEMS.has(c.number)) errors.push(`Item ${c.number} é crítico e não aceita N/A.`);
-    if (normalizeText(c.justification).length < 10) errors.push(`Item ${c.number}: justifique o N/A com pelo menos 10 caracteres.`);
+  let firstInvalid = null;
+  checklist.forEach(c => {
+    if (!c.answer) {
+      errors.push(`Item ${c.number}: selecione Sim, Não ou N/A.`);
+      if (!firstInvalid) firstInvalid = checklistIssueTarget(c.number);
+    }
+    if (c.answer === 'NA' && normalizeText(c.justification).length < 10) {
+      errors.push(`Item ${c.number}: justifique o N/A com pelo menos 10 caracteres.`);
+      if (!firstInvalid) firstInvalid = checklistIssueTarget(c.number, 'justification');
+    }
   });
+  const naItems = checklist.filter(c => c.answer === 'NA');
+  if (naItems.length > MAX_NA_ITEMS_WARNING) warnings.push(`Há ${naItems.length} itens marcados N/A. Revise se todos realmente não se aplicam.`);
 
-  const negativeBlocking = checklist.filter(c => c.answer === 'N' && !['12', '15', '20'].includes(c.number));
-  if (negativeBlocking.length) errors.push(`Há ${negativeBlocking.length} item(ns) impeditivo(s) marcado(s) como NÃO.`);
-  const answer = n => checklist.find(c => c.number === n)?.answer;
-  if (answer('12') !== 'N') errors.push('Item 12 deve estar marcado como NÃO para confirmar ausência de atmosfera IPVS.');
-  if (answer('15') === 'S' && answer('19') !== 'S') errors.push('Item 15 indica necessidade de ar mandado, mas o item 19 não confirma linha de ar instalada e operando.');
-  if (answer('20') === 'S') warnings.push('Há necessidade de ferramentas intrinsecamente seguras. Confira a especificação antes da entrada.');
+  const answer = number => checklist.find(c => c.number === number)?.answer;
+  const unsafeNo = checklist.filter(c => c.answer === 'N' && !['12','15','20'].includes(c.number));
+  const criticalNa = checklist.filter(c => c.answer === 'NA' && NA_CRITICAL_ITEMS.has(c.number));
+  const safetyMessages = [];
+  if (unsafeNo.length) safetyMessages.push(`Há ${unsafeNo.length} item(ns) de segurança marcado(s) como NÃO (${unsafeNo.map(c => c.number).join(', ')}).`);
+  if (answer('12') === 'S') safetyMessages.push('Item 12 indica atmosfera IPVS. A entrada não pode ser autorizada enquanto essa condição existir.');
+  if (criticalNa.length) safetyMessages.push(`N/A em item(ns) crítico(s): ${criticalNa.map(c => c.number).join(', ')}. Revise antes da emissão oficial.`);
+  if (answer('15') === 'S' && answer('19') !== 'S') safetyMessages.push('Item 15 indica necessidade de ar mandado, mas o item 19 não confirma a linha de ar instalada e operando.');
+  if (answer('20') === 'S') warnings.push('Item 20 indica necessidade de ferramentas intrinsecamente seguras. Confirme a especificação antes da entrada.');
+  if (finalSafety) errors.push(...safetyMessages);
+  else warnings.push(...safetyMessages.map(message => `${message} Você pode continuar preenchendo, mas a emissão oficial ficará bloqueada até correção/revisão.`));
+  return { errors, warnings, firstInvalid, checklist };
+}
 
-  if (answer('10') !== 'S') errors.push('Item 10 deve confirmar que a calibração do detector está atualizada.');
-  if (!normalizeText(form.elements.detectorId.value)) errors.push('Informe o identificador do detector.');
-  if (!form.elements.detectorCalibracao.value) errors.push('Informe a validade/calibração do detector.');
-  if (form.elements.detectorCalibracao.value && form.elements.detectorCalibracao.value < (form.elements.data.value || todayISO())) errors.push('A validade/calibração do detector está vencida na data da PET.');
+/** Valida identificação, detector e dados gerais da etapa 1. */
+function validateIdentificationSection() {
+  const base = validateRequiredFieldsInStep(1);
+  const errors = [...base.errors];
+  const warnings = [];
+  let firstInvalid = base.firstInvalid;
+  const form = $('#petForm');
+  if (!normalizeText(form.elements.detectorId?.value)) {
+    errors.push('Informe o identificador do detector.');
+    firstInvalid ||= form.elements.detectorId;
+  }
+  if (!form.elements.detectorCalibracao?.value) {
+    errors.push('Informe a validade/calibração do detector.');
+    firstInvalid ||= form.elements.detectorCalibracao;
+  }
+  if (form.elements.detectorCalibracao?.value && form.elements.detectorCalibracao.value < (form.elements.data?.value || todayISO())) {
+    errors.push('A validade/calibração do detector está vencida na data da PET.');
+    firstInvalid ||= form.elements.detectorCalibracao;
+  }
+  const emission = form.elements.horaEmissao?.value;
+  const termino = form.elements.horaTermino?.value;
+  if (emission && termino && termino <= emission) warnings.push('Hora de término igual ou anterior à emissão. Confira se o serviço atravessa a meia-noite.');
+  return { ok: errors.length === 0, errors, warnings, firstInvalid };
+}
 
-  const gasChecks = checkGasMeasurements();
-  errors.push(...gasChecks.errors);
-  warnings.push(...gasChecks.warnings);
-
+/** Valida limites, preenchimento, fotos e assinaturas dos participantes da etapa 4. */
+function validatePeopleSection() {
+  syncPeopleFromInputs();
+  const errors = [];
+  const warnings = [];
+  let firstInvalid = null;
   const typeCounts = people.reduce((acc, p) => { acc[p.type] = (acc[p.type] || 0) + 1; return acc; }, {});
   if (people.length > MAX_PARTICIPANTS) errors.push(`A equipe excede o limite de ${MAX_PARTICIPANTS} participantes.`);
   if ((typeCounts.entrante || 0) > MAX_ENTRANTES) errors.push(`A equipe excede o limite de ${MAX_ENTRANTES} entrantes.`);
@@ -961,68 +1128,121 @@ function validateCurrentForm() {
   if (!typeCounts.entrante) errors.push('Inclua pelo menos um entrante.');
   if (!typeCounts.vigia) errors.push('Inclua pelo menos um vigia.');
   if (typeCounts.supervisor !== 1) errors.push('Inclua exatamente um supervisor de entrada.');
-
   people.forEach(p => {
-    if (!normalizeText(p.nome)) errors.push(`${p.role}: nome obrigatório.`);
-    if (!normalizeText(p.matricula)) errors.push(`${p.role}: matrícula obrigatória.`);
-    if (!p.photoDataUrl) errors.push(`${p.role}: foto obrigatória, com rosto e crachá funcional visível.`);
-    if (!p.signatureDataUrl) errors.push(`${p.role}: assinatura obrigatória.`);
-    if (p._dirtySignature) errors.push(`${p.role}: assinatura alterada, mas ainda não registrada.`);
-    if (p.signatureDataUrl && p.signatureMetrics && !p.signatureMetrics.isSigned) errors.push(`${p.role}: assinatura inválida ou vazia.`);
+    const card = $(`.person-card[data-person-id="${p.id}"]`);
+    if (!normalizeText(p.nome)) { errors.push(`${p.role}: nome obrigatório.`); firstInvalid ||= $('[data-field="nome"]', card); }
+    if (!normalizeText(p.matricula)) { errors.push(`${p.role}: matrícula obrigatória.`); firstInvalid ||= $('[data-field="matricula"]', card); }
+    if (!p.photoDataUrl) { errors.push(`${p.role}: foto obrigatória, com rosto e crachá funcional visível.`); firstInvalid ||= card; }
+    if (!p.signatureDataUrl) { errors.push(`${p.role}: registre a assinatura antes de continuar.`); firstInvalid ||= card; }
+    if (p._dirtySignature) { errors.push(`${p.role}: a assinatura foi alterada; clique em “Registrar assinatura” novamente.`); firstInvalid ||= card; }
+    if (p.signatureDataUrl && p.signatureMetrics && !p.signatureMetrics.isSigned) { errors.push(`${p.role}: assinatura inválida ou vazia.`); firstInvalid ||= card; }
   });
-
   const matriculas = new Map();
   people.forEach(p => {
     const mat = normalizeText(p.matricula).toLowerCase();
     if (!mat) return;
     const list = matriculas.get(mat) || [];
-    list.push(p.role); matriculas.set(mat, list);
+    list.push(p.role);
+    matriculas.set(mat, list);
   });
-  matriculas.forEach((roles, mat) => { if (roles.length > 1) errors.push(`Matrícula repetida (${mat}) em: ${roles.join(', ')}.`); });
-
-  const supervisorCard = people.find(p => p.type === 'supervisor');
-  const supervisorField = normalizeText(form.elements.supervisorEntrada.value).toLowerCase();
-  const supervisorName = normalizeText(supervisorCard?.nome).toLowerCase();
-  if (supervisorField && supervisorName && supervisorField !== supervisorName) errors.push('O supervisor da identificação está diferente do supervisor que assinou.');
-
-  const emission = form.elements.horaEmissao.value;
-  const termino = form.elements.horaTermino.value;
-  if (emission && termino && termino <= emission) warnings.push('Hora de término igual ou anterior à emissão. Confira serviço após meia-noite.');
-  if (!crypto?.subtle) errors.push('Este navegador não oferece os recursos criptográficos necessários.');
-  return { ok: errors.length === 0, errors, warnings, firstInvalid: form.querySelector(':invalid') };
+  matriculas.forEach((roles, mat) => {
+    if (roles.length > 1) {
+      errors.push(`Matrícula repetida (${mat}) em: ${roles.join(', ')}.`);
+      if (!firstInvalid) firstInvalid = $('#peopleList');
+    }
+  });
+  updateSupervisorAutoDisplay();
+  return { ok: errors.length === 0, errors, warnings, firstInvalid };
 }
 
-/** Valida medições atmosféricas e impede valores negativos ou fora dos limites. */
+/** Valida uma etapa específica. A etapa 2 alerta sobre segurança, mas permite concluir o restante do formulário. */
+function validateFormStep(step, options = {}) {
+  const finalSafety = Boolean(options.finalSafety);
+  if (step === 1) return validateIdentificationSection();
+  if (step === 2) {
+    const result = validateChecklistSection({ finalSafety });
+    return { ok: result.errors.length === 0, errors: result.errors, warnings: result.warnings, firstInvalid: result.firstInvalid };
+  }
+  if (step === 3) {
+    const gas = checkGasMeasurements();
+    return { ok: gas.errors.length === 0, ...gas };
+  }
+  if (step === 4) return validatePeopleSection();
+  if (step === 5) {
+    const base = validateRequiredFieldsInStep(5);
+    return { ok: base.errors.length === 0, errors: base.errors, warnings: [], firstInvalid: base.firstInvalid };
+  }
+  return { ok: true, errors: [], warnings: [], firstInvalid: null };
+}
+
+/** Executa todas as regras impeditivas antes da emissão oficial. */
+function validateCurrentForm() {
+  syncPeopleFromInputs();
+  const errors = [];
+  const warnings = [];
+  let firstInvalid = null;
+  [1,2,3,4,5].forEach(step => {
+    const result = validateFormStep(step, { finalSafety: step === 2 });
+    errors.push(...(result.errors || []));
+    warnings.push(...(result.warnings || []));
+    firstInvalid ||= result.firstInvalid;
+  });
+  if (!crypto?.subtle) errors.push('Este navegador não oferece os recursos criptográficos necessários.');
+  return { ok: errors.length === 0, errors: [...new Set(errors)], warnings: [...new Set(warnings)], firstInvalid };
+}
+
+/**
+ * Valida medições atmosféricas.
+ * O quê: impede números negativos e só libera valores fora dos limites após um teste pós-ventilação completo e seguro.
+ * Como: a medição inicial é obrigatória; a segunda é exigida quando a primeira estiver fora dos limites ou quando tiver sido iniciada.
+ * Quando: ao avançar da etapa Atmosfera e novamente na emissão oficial/Worker.
+ */
 function checkGasMeasurements() {
   const form = $('#petForm');
   const errors = [];
   const warnings = [];
+  let firstInvalid = null;
+  function raw(name) { return form.elements[name]?.value ?? ''; }
   function val(name) {
-    const raw = form.elements[name]?.value;
-    if (raw === '') return null;
-    const n = Number(String(raw).replace(',', '.'));
+    const value = raw(name);
+    if (value === '') return null;
+    const n = Number(String(value).replace(',', '.'));
     return Number.isFinite(n) ? n : null;
   }
-  const rows = [
-    { key: 'inicial', label: 'Teste inicial', required: true },
-    { key: 'ventilacao', label: 'Teste após ventilação', required: false }
-  ];
-  rows.forEach(row => {
-    const values = { o2: val(`gas_${row.key}_o2`), lie: val(`gas_${row.key}_lie`), h2s: val(`gas_${row.key}_h2s`), co: val(`gas_${row.key}_co`) };
-    const any = Object.values(values).some(v => v !== null) || form.elements[`gas_${row.key}_hora`]?.value;
-    if (row.required || any) {
-      if (!form.elements[`gas_${row.key}_hora`]?.value) errors.push(`${row.label}: hora não preenchida.`);
-      Object.entries(values).forEach(([k, v]) => {
-        if (v === null) errors.push(`${row.label}: campo ${k.toUpperCase()} não preenchido ou inválido.`);
-        else if (v < 0) errors.push(`${row.label}: ${k.toUpperCase()} não pode ser negativo.`);
-      });
-      if (values.o2 !== null && !(values.o2 > 19.5 && values.o2 < 23)) errors.push(`${row.label}: O₂ fora do intervalo seguro.`);
-      if (values.lie !== null && !(values.lie < 10)) errors.push(`${row.label}: inflamável (%LIE) igual ou acima de 10%.`);
-      if (values.h2s !== null && !(values.h2s < 5)) errors.push(`${row.label}: H₂S igual ou acima de 5 ppm.`);
-      if (values.co !== null && !(values.co < 25)) errors.push(`${row.label}: CO igual ou acima de 25 ppm.`);
+  function evaluate(key, label, required) {
+    const hourEl = form.elements[`gas_${key}_hora`];
+    const values = {
+      o2: val(`gas_${key}_o2`), lie: val(`gas_${key}_lie`), h2s: val(`gas_${key}_h2s`), co: val(`gas_${key}_co`)
+    };
+    const any = Boolean(hourEl?.value) || Object.values(values).some(v => v !== null) || normalizeText(form.elements[`gas_${key}_obs`]?.value);
+    if (!required && !any) return { present: false, complete: false, safe: false, values };
+    let complete = true;
+    if (!hourEl?.value) { errors.push(`${label}: informe a hora.`); firstInvalid ||= hourEl; complete = false; }
+    for (const [code, value] of Object.entries(values)) {
+      const el = form.elements[`gas_${key}_${code}`];
+      if (value === null) { errors.push(`${label}: preencha ${code.toUpperCase()}.`); firstInvalid ||= el; complete = false; }
+      else if (value < 0) { errors.push(`${label}: ${code.toUpperCase()} não pode ser negativo.`); firstInvalid ||= el; complete = false; }
     }
-  });
-  return { errors, warnings };
+    const safe = complete && values.o2 > 19.5 && values.o2 < 23 && values.lie < 10 && values.h2s < 5 && values.co < 25;
+    return { present: true, complete, safe, values };
+  }
+  const initial = evaluate('inicial', 'Teste inicial', true);
+  const ventilationStarted = Boolean(raw('gas_ventilacao_hora') || raw('gas_ventilacao_o2') || raw('gas_ventilacao_lie') || raw('gas_ventilacao_h2s') || raw('gas_ventilacao_co') || normalizeText(raw('gas_ventilacao_obs')));
+  const after = evaluate('ventilacao', 'Teste após ventilação', !initial.safe || ventilationStarted);
+  if (initial.complete && !initial.safe) {
+    warnings.push('A medição inicial ficou fora dos limites de referência; o teste após ventilação é obrigatório para demonstrar condição segura.');
+    if (!after.present || !after.complete) {
+      errors.push('Conclua o teste após ventilação antes de continuar.');
+      firstInvalid ||= form.elements.gas_ventilacao_hora;
+    } else if (!after.safe) {
+      errors.push('O teste após ventilação permanece fora dos limites seguros. A entrada não pode ser autorizada.');
+      firstInvalid ||= form.elements.gas_ventilacao_o2;
+    }
+  } else if (after.present && after.complete && !after.safe) {
+    errors.push('O teste após ventilação está fora dos limites seguros.');
+    firstInvalid ||= form.elements.gas_ventilacao_o2;
+  }
+  return { errors, warnings, firstInvalid };
 }
 
 /**
@@ -1054,19 +1274,21 @@ async function finalizeRecord() {
   if (!accessOk) return;
   const validation = validateCurrentForm();
   showValidation(validation);
-  if (!validation.ok) { focusFirstFormIssue(validation); return alert('Não é possível finalizar enquanto houver impedimentos automáticos.'); }
+  if (!validation.ok) { focusFirstFormIssue(validation); return alert('Existem impedimentos de segurança ou campos incompletos. Revise o item destacado antes de emitir.'); }
 
   const button = $('#finalizeBtn');
   finalizationInProgress = true;
   if (button) { button.disabled = true; button.textContent = 'Gerando e registrando...'; }
   try {
-    // Em uma tentativa pendente, reaproveita número, conteúdo e idempotência para não duplicar emissão.
-    let record = finalizedRecord;
-    if (!record?.pendingOfficialRegistration) {
+    // Reaproveita uma tentativa interrompida apenas como identidade/idempotência. A condição
+    // “pendente de registro” só será ativada depois que PDF + JSON existirem no IndexedDB.
+    let record = normalizeFinalizationRecordStructure(finalizedRecord);
+    if (!record || record.serverRegistration) record = null;
+    if (!record) {
       const payload = buildPayload();
       const payloadHash = await sha256Hex(payload);
       const signature = await signPayloadHash(payloadHash);
-      record = {
+      record = normalizeFinalizationRecordStructure({
         recordType: RECORD_TYPE,
         recordId: payloadHash.slice(0, 16).toUpperCase(),
         idempotencyKey: crypto.randomUUID(),
@@ -1078,20 +1300,20 @@ async function finalizeRecord() {
           validationWarnings: validation.warnings,
           pdfGenerationProofs: []
         },
-        pendingOfficialRegistration: true
-      };
+        pendingOfficialRegistration: false
+      });
       finalizedRecord = record;
     }
 
-    // A prova é criada antes do PDF, portanto aparece no arquivo que será efetivamente hasheado.
     if (!latestPdfProof(record)) {
       const proof = await buildPdfGenerationProof(record);
-      record.integrity.pdfGenerationProofs.push(proof);
+      normalizeFinalizationRecordStructure(record).integrity.pdfGenerationProofs.push(proof);
       record.integrity.latestPdfProofHashSha256 = proof.pdfProofHashSha256;
     }
     renderIntegrity(record);
     renderPrintArea(record);
 
+    // Primeiro gera os bytes finais; só depois uma tentativa pode ser considerada reenviável.
     const pdfFile = await createPdfFile(record);
     const pdfHash = await sha256BlobHex(pdfFile);
     const dossier = buildRegisteredDossier(record, pdfHash, pdfFile.name);
@@ -1104,44 +1326,53 @@ async function finalizeRecord() {
       jsonHashSha256: jsonHash,
       generatedAt: new Date().toISOString()
     };
+    record.pendingOfficialRegistration = true;
     await saveOfficialFiles(record, pdfFile, jsonText);
+    updateStoredRecord(record);
 
     await registerRecordOnServer(record, { pdfHash, jsonHash, pdfFile, jsonText });
     record.pendingOfficialRegistration = false;
-    // A aceitação do Worker é a autoridade. Uma falha local posterior não pode transformar
-    // uma PET já aceita em emissão pendente; apenas informa que o aparelho não conseguiu
-    // atualizar sua cópia temporária.
     try {
       await saveOfficialFiles(record, pdfFile, jsonText);
     } catch (localError) {
-      showStorageNotice('A PET foi aceita no servidor, mas o aparelho não conseguiu atualizar a cópia local. Compartilhe imediatamente o PDF e o comprovante.', 'warn');
+      showStorageNotice('A PET foi aceita no servidor, mas o aparelho não conseguiu atualizar a cópia local. Compartilhe imediatamente o PDF e o arquivo de validação (JSON).', 'warn');
       console.warn('Falha ao atualizar snapshot local após registro oficial', localError);
     }
     updateStoredRecord(record);
     localStorage.removeItem(currentDraftKey());
     renderIntegrity(record);
     renderPrintArea(record);
+    $('#documentActions')?.classList.remove('hidden');
     ['#printBtn','#sharePdfBtn','#exportBtn','#shareJsonBtn'].forEach(sel => { const b=$(sel); if (b) b.disabled=false; });
-    $('#registerServerBtn').disabled = true;
-    $('#registerServerBtn').classList.add('hidden');
+    const retry = $('#registerServerBtn');
+    if (retry) { retry.disabled = true; retry.classList.add('hidden'); }
     if (button) { button.disabled = true; button.textContent = 'PET finalizada'; }
-    updateFormAccessStatus('PET oficial gerada e registrada. Envie o PDF e o comprovante ao supervisor.', 'ok');
+    updateFormAccessStatus('PET oficial gerada e registrada. Envie o PDF e o arquivo de validação (JSON) ao supervisor.', 'ok');
     const historySaved = saveRecord(record);
-    if (!historySaved) {
-      showStorageNotice('A PET foi aceita no servidor, mas a referência não coube no histórico local. Compartilhe agora o PDF e o comprovante com o supervisor.', 'warn');
-    }
-    alert('PET oficial concluída. O PDF e o comprovante foram vinculados ao registro do servidor. Envie os dois arquivos ao supervisor.');
+    if (!historySaved) showStorageNotice('A PET foi aceita no servidor, mas a referência não coube no histórico local. Compartilhe agora os dois arquivos com o supervisor.', 'warn');
+    alert('PET oficial concluída. Envie o PDF e o arquivo de validação da PET (JSON) ao supervisor.');
     renderRecords();
   } catch (err) {
+    const reusable = finalizedRecord && await hasCompletePendingArtifacts(finalizedRecord);
     if (finalizedRecord) {
-      finalizedRecord.pendingOfficialRegistration = true;
+      finalizedRecord.pendingOfficialRegistration = reusable;
       updateStoredRecord(finalizedRecord);
     }
-    $('#registerServerBtn').disabled = false;
-    $('#registerServerBtn').classList.remove('hidden');
-    renderServerPanel('A emissão não foi concluída. Nenhum novo número será criado ao tentar novamente: ' + err.message, 'bad');
-    alert('Não foi possível concluir a emissão oficial: ' + err.message + '\nTente novamente; o sistema reutilizará a mesma tentativa para evitar duplicidade.');
-    if (button) { button.disabled = false; button.textContent = 'Tentar finalizar novamente'; }
-  } finally { finalizationInProgress = false; }
+    const retry = $('#registerServerBtn');
+    if (retry) {
+      retry.disabled = !reusable;
+      retry.classList.toggle('hidden', !reusable);
+    }
+    if (reusable) {
+      renderServerPanel('Os arquivos foram gerados, mas o envio ao servidor não terminou. Use “Repetir registro pendente”; a mesma PET será reutilizada.', 'bad');
+      alert('Os documentos foram gerados, mas o registro no servidor não foi concluído: ' + err.message + '\nUse “Repetir registro pendente”.');
+      if (button) { button.disabled = false; button.textContent = 'Tentar finalizar novamente'; }
+    } else {
+      renderServerPanel('A geração foi interrompida antes de existir um conjunto completo de arquivos: ' + err.message, 'bad');
+      alert('Não foi possível concluir a emissão oficial: ' + err.message + '\nO formulário foi preservado. Corrija o problema e tente finalizar novamente.');
+      if (button) { button.disabled = false; button.textContent = 'Tentar finalizar novamente'; }
+    }
+  } finally {
+    finalizationInProgress = false;
+  }
 }
-

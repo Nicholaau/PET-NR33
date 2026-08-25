@@ -1,11 +1,11 @@
 <!doctype html>
-<!-- PET-Digital NR-33 v1.1.5 comentado: estrutura visual do app. O comportamento é dividido em quatro arquivos JavaScript; a API fica no Worker. -->
+<!-- PET-Digital NR-33 v1.1.6 comentado: estrutura visual do app. O comportamento é dividido em quatro arquivos JavaScript; a API fica no Worker. -->
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#0b3a66" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://pet-digital-api.nicholas-dmae.workers.dev; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; worker-src 'self' blob:; manifest-src 'self'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://pet-digital-api.nicholas-dmae.workers.dev; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; worker-src 'self' blob:; manifest-src 'self'" />
   <title>PET Digital NR-33 — DMAE</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="stylesheet" href="styles.css" />
@@ -18,7 +18,7 @@
       <span>DMAE — Permissão de Entrada e Trabalho para Espaço Confinado</span>
     </div>
     <nav>
-      <button type="button" class="ghost" data-tab="formTab">Preencher</button>
+      <button type="button" class="ghost active" data-tab="formTab" aria-current="page">Preencher</button>
       <button type="button" class="ghost" data-tab="systemTab">Sistema</button>
       <button type="button" class="ghost" data-tab="recordsTab">Registros</button>
       <button type="button" class="ghost" data-tab="verifyTab">Validar</button>
@@ -46,7 +46,7 @@
       <div id="authStatus" class="validation-box warn">Informe suas credenciais para acessar o sistema.</div>
 
       <div class="login-grid">
-        <form id="loginForm" class="login-panel">
+        <form id="loginForm" class="login-panel login-main-panel">
           <h2>Entrar</h2>
           <label>Matrícula
             <input id="loginMatricula" autocomplete="username" placeholder="Matrícula" />
@@ -60,10 +60,11 @@
           <p class="hint">Após o login, o formulário da PET e os registros salvos neste dispositivo serão liberados.</p>
         </form>
 
-        <form id="setupAdminForm" class="login-panel setup-panel">
+        <form id="setupAdminForm" class="setup-panel">
           <details>
-            <summary>Primeiro acesso / criar administrador</summary>
-            <p class="hint">Use apenas na instalação inicial do sistema.</p>
+            <summary>Configuração inicial do sistema</summary>
+            <div class="setup-panel-content">
+            <p class="hint">Use somente uma vez, durante a implantação, para criar o primeiro administrador.</p>
             <label>Token de instalação
               <input id="setupToken" type="password" placeholder="Token de instalação" />
             </label>
@@ -81,6 +82,7 @@
             </label>
             <div class="actions no-print">
               <button type="submit" id="setupAdminBtn" class="secondary">Criar primeiro administrador</button>
+            </div>
             </div>
           </details>
         </form>
@@ -113,17 +115,14 @@
         </section>
 
         <nav class="form-wizard no-print" aria-label="Etapas do preenchimento">
-          <div class="form-progress-head"><strong id="formProgressLabel">Etapa 1 de 6: Identificação</strong><progress id="formProgressBar" max="6" value="1">1 de 6</progress></div>
-          <div id="formStepButtons" class="form-step-buttons">
-            <button type="button" data-form-step-target="1">1. Identificação</button>
-            <button type="button" data-form-step-target="2">2. Checklist</button>
-            <button type="button" data-form-step-target="3">3. Atmosfera</button>
-            <button type="button" data-form-step-target="4">4. Equipe</button>
-            <button type="button" data-form-step-target="5">5. Ciência</button>
-            <button type="button" data-form-step-target="6">6. Finalização</button>
+          <div class="form-progress-head">
+            <strong id="formProgressLabel">Etapa 1 de 6: Identificação</strong>
+            <progress id="formProgressBar" max="6" value="1">1 de 6</progress>
           </div>
+          <div id="stepValidationBox" class="step-validation hidden" role="status" aria-live="polite"></div>
           <div class="form-step-nav">
-            <button type="button" id="formPrevBtn" class="ghost">Etapa anterior</button>
+            <button type="button" id="formPrevBtn" class="ghost">Voltar</button>
+            <span id="formStepCounter" class="form-step-counter" aria-hidden="true">1 / 6</span>
             <button type="button" id="formNextBtn" class="secondary">Próxima etapa</button>
           </div>
         </nav>
@@ -157,9 +156,10 @@
             <textarea required name="trabalho" rows="3" placeholder="Descreva de forma objetiva o serviço autorizado"></textarea>
           </label>
           <div class="grid cols-2">
-            <label>Supervisor de entrada
-              <input required name="supervisorEntrada" placeholder="Nome completo" />
-            </label>
+            <div class="auto-field" aria-live="polite">
+              <strong>Supervisor de entrada</strong>
+              <span id="supervisorAutoLabel">Será preenchido automaticamente com o supervisor informado na etapa “Equipe”.</span>
+            </div>
             <fieldset class="inline-fieldset">
               <legend>Equipe de salvamento</legend>
               <label><input type="radio" name="equipeSalvamento" value="Própria" required /> Própria</label>
@@ -170,10 +170,10 @@
           </div>
           <div class="grid cols-2">
             <label>Identificador do equipamento detector
-              <input name="detectorId" placeholder="Nº de série / patrimônio" />
+              <input required name="detectorId" placeholder="Nº de série / patrimônio" />
             </label>
             <label>Validade/calibração do detector
-              <input type="date" name="detectorCalibracao" />
+              <input required type="date" name="detectorCalibracao" />
             </label>
           </div>
           <div class="actions no-print">
@@ -185,8 +185,9 @@
         <!-- Seção 2: checklist dinâmico renderizado pelo módulo de formulário a partir de checklistItems. -->
         <section class="card" data-form-step="2">
           <h2>2. Itens a serem verificados antes da emissão da PET</h2>
-          <p class="hint">A entrada não deve ser liberada quando houver campo obrigatório sem preenchimento ou resposta que impeça a entrada segura. A opção N/A é restrita aos itens não críticos, exige justificativa e possui limite automático.</p>
-          <div class="table-wrap">
+          <p class="hint">Todos os 22 itens devem receber uma resposta. Selecione Sim, Não ou N/A conforme a condição realmente verificada. O aplicativo não força uma resposta específica: condições inseguras serão sinalizadas e podem impedir a emissão oficial. Todo N/A exige justificativa.</p>
+          <div id="checklistCards" class="checklist-cards" aria-label="Checklist de segurança"></div>
+          <div class="table-wrap checklist-desktop-wrap">
             <table id="checklistTable" class="checklist-table">
               <thead>
                 <tr><th>Nº</th><th>Item</th><th>Sim</th><th>Não</th><th>N/A</th></tr>
@@ -237,7 +238,7 @@
         <!-- Seção 4: lista dinâmica de profissionais, fotos e canvas de assinatura. -->
         <section class="card" data-form-step="4">
           <h2>4. Relação de profissionais e assinaturas</h2>
-          <p class="hint">Capture a foto do servidor e assine no campo correspondente. A foto deve mostrar o rosto do servidor com o crachá funcional visível. Foto, assinatura, data/hora, matrícula e demais dados entram no comprovante técnico da PET.</p>
+          <p class="hint">Capture a foto do servidor e assine no campo correspondente. A foto deve mostrar o rosto do servidor com o crachá funcional visível. Foto, assinatura, data/hora, matrícula e demais dados entram no arquivo de validação da PET (JSON).</p>
           <div id="peopleList" class="people-list"></div>
           <div class="actions no-print">
             <button type="button" id="addEntrante" class="secondary">Adicionar entrante</button>
@@ -264,18 +265,27 @@
           </label>
         </section>
 
-        <!-- Seção 6: comandos de validação, finalização, impressão e comprovante técnico. -->
+        <!-- Seção 6: comandos de validação, finalização, impressão e arquivo de validação da PET (JSON). -->
         <section class="card status-card no-print" data-form-step="6">
           <h2>6. Finalização e documentos</h2>
-          <div id="validationBox" class="validation-box" role="status" aria-live="polite">Preencha o formulário e clique em “Validar”. Para finalizar e gerar os documentos oficiais, é necessário estar logado e com o dispositivo autorizado.</div>
-          <div class="actions">
-            <button type="button" id="validateBtn" class="secondary">Validar</button>
+          <div id="validationBox" class="validation-box" role="status" aria-live="polite">As etapas anteriores são validadas ao avançar. Nesta etapa, confira o resumo e finalize a PET oficial.</div>
+          <div class="actions final-primary-actions">
             <button type="button" id="finalizeBtn">Finalizar PET oficial</button>
-            <button type="button" id="registerServerBtn" class="secondary hidden" disabled>Repetir registro pendente</button>
-            <button type="button" id="printBtn" class="secondary" disabled>Abrir PDF oficial</button>
-            <button type="button" id="sharePdfBtn" class="secondary" disabled>Compartilhar PDF</button>
-            <button type="button" id="exportBtn" class="secondary" disabled>Salvar comprovante técnico</button>
-            <button type="button" id="shareJsonBtn" class="secondary" disabled>Compartilhar comprovante</button>
+            <button type="button" id="registerServerBtn" class="secondary hidden" disabled>Repetir envio pendente</button>
+          </div>
+          <div id="documentActions" class="document-actions hidden">
+            <h3>Documentos gerados</h3>
+            <div class="actions document-share-actions">
+              <button type="button" id="sharePdfBtn" class="secondary" disabled>Compartilhar PDF</button>
+              <button type="button" id="shareJsonBtn" class="secondary" disabled>Compartilhar arquivo de validação (JSON)</button>
+            </div>
+            <details class="advanced-details output-more-actions">
+              <summary>Outras opções</summary>
+              <div class="actions">
+                <button type="button" id="printBtn" class="ghost" disabled>Abrir PDF oficial</button>
+                <button type="button" id="exportBtn" class="ghost" disabled>Salvar arquivo de validação (JSON)</button>
+              </div>
+            </details>
           </div>
           <div id="integrityPanel" class="integrity-panel hidden"></div>
           <div id="serverPanel" class="integrity-panel hidden"></div>
@@ -373,13 +383,13 @@
       </section>
 
       <section class="card">
-        <h2>Consultar comprovante no sistema</h2>
-        <p class="hint">Consulta se o código técnico do comprovante foi registrado. A conferência completa continua exigindo o comprovante técnico gerado junto com o PDF.</p>
-        <label>Código técnico do comprovante
+        <h2>Consultar registro da PET</h2>
+        <p class="hint">Consulta se o código de conferência da PET foi registrado no sistema. A validação completa exige o PDF e o arquivo de validação da PET (JSON).</p>
+        <label>Código de conferência
           <input id="serverHashInput" placeholder="Cole o código de 64 caracteres" />
         </label>
         <div class="actions no-print">
-          <button type="button" id="serverValidateBtn" class="secondary">Consultar comprovante</button>
+          <button type="button" id="serverValidateBtn" class="secondary">Consultar registro da PET</button>
         </div>
         <div id="serverValidateResult" class="validation-box"></div>
       </section>
@@ -436,7 +446,7 @@
     <section id="recordsTab" class="tab">
       <section class="card">
         <h2>Registros salvos neste dispositivo</h2>
-        <p class="hint">Registros salvos apenas neste dispositivo (até 30 referências recentes). Os dados locais são temporários e podem desaparecer por limpeza do navegador, troca de aparelho ou atualização do sistema. Após gerar a PET, envie imediatamente o PDF e o comprovante técnico ao supervisor responsável.</p>
+        <p class="hint">Registros salvos apenas neste dispositivo (até 30 referências recentes). Os dados locais são temporários e podem desaparecer por limpeza do navegador, troca de aparelho ou atualização do sistema. Após gerar a PET, envie imediatamente o PDF e o arquivo de validação da PET (JSON) ao supervisor responsável.</p>
         <div class="actions no-print">
           <button type="button" id="refreshRecords" class="secondary">Atualizar lista</button>
         </div>
@@ -444,16 +454,16 @@
       </section>
     </section>
 
-    <!-- Aba Validar: importa o comprovante técnico e confere integridade/assinaturas. -->
+    <!-- Aba Validar: importa o arquivo de validação da PET (JSON) e confere integridade/assinaturas. -->
     <section id="verifyTab" class="tab">
       <section class="card">
         <h2>Validar PET Digital</h2>
-        <p>Selecione o <strong>PDF oficial</strong> e o <strong>comprovante técnico JSON</strong> correspondentes. O aplicativo recalcula os hashes reais dos dois arquivos e consulta o registro do servidor; não confia apenas nos dados contidos no comprovante.</p>
+        <p>Selecione o <strong>PDF oficial</strong> e o <strong>arquivo de validação da PET (JSON)</strong> correspondentes. O aplicativo recalcula os hashes reais dos dois arquivos e consulta o registro do servidor; não confia apenas nos dados contidos no próprio arquivo.</p>
         <div class="verify-file-grid">
           <label>PDF oficial
             <input type="file" id="verifyPdfFile" accept="application/pdf,.pdf" />
           </label>
-          <label>Comprovante técnico
+          <label>Arquivo de validação da PET (JSON)
             <input type="file" id="verifyJsonFile" accept="application/json,.json" />
           </label>
         </div>
@@ -471,8 +481,6 @@
     <span>PET Digital NR-33 — DMAE • Permissão de Entrada e Trabalho para Espaço Confinado</span>
   </footer>
 
-  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js" integrity="sha512-BNaRQnYJYiPSqHHDb58B0yaPfCu+Wgds8Gp/gU33kqBtgNS4tSPHuGibyoeqMV/TJlSKda6FXzoEyYGjTe+vXA==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/4.2.1/jspdf.umd.min.js" integrity="sha512-+EeCylkt9WHJk5tGJxYdecHOcXFRME7qnbsfeMsdQL6NUPYm2+uGFmyleEqsmVoap/f3dN/sc3BX9t9kHXkHHg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <script defer src="app-core.js"></script>
   <script defer src="app-system.js"></script>
   <script defer src="app-form.js"></script>

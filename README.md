@@ -1,88 +1,60 @@
-# PET-Digital NR-33 v1.1.5 — Cloudflare comentado
+# PET-Digital NR-33 v1.1.6 — Cloudflare comentado
 
-Versão de endurecimento de segurança, estabilidade, acessibilidade e experiência móvel do PET-Digital NR-33.
+Versão de correção e refinamento da experiência de emissão da PET Digital NR-33. Esta entrega mantém a arquitetura **Cloudflare Pages + Worker + D1**, sem armazenar PDF, JSON, fotos ou imagens de assinatura no D1.
 
 ## Arquitetura
 
 - **Cloudflare Pages:** interface do aplicativo.
-- **Cloudflare Worker:** autenticação, autorização, validação e registro.
-- **Cloudflare D1:** usuários, sessões, dispositivos, hashes, participantes e auditoria.
-- **Dispositivo do usuário:** PDF, comprovante técnico, rascunho e chave privada não exportável.
+- **Cloudflare Worker:** autenticação, autorização, validação, registro e auditoria.
+- **Cloudflare D1:** usuários, sessões, dispositivos autorizados, hashes, participantes e auditoria.
+- **Dispositivo do usuário:** rascunho, chave privada não exportável e cópias temporárias do PDF/arquivo de validação (JSON).
 
-URLs configuradas:
+URLs configuradas nesta versão:
 
 - API: `https://pet-digital-api.nicholas-dmae.workers.dev`
 - Frontend: `https://pet-digital.pages.dev`
 
-O D1 não armazena PDF, JSON, foto ou imagem de assinatura. Os arquivos são recebidos apenas durante a requisição de registro/validação para recálculo independente dos hashes.
+> O D1 não guarda os arquivos finais. Durante o registro/validação, o Worker recebe temporariamente PDF e JSON, recalcula os hashes e grava somente hashes/metadados necessários à prova e auditoria.
 
-## Alterações principais da v1.1.5
+## Alterações principais da v1.1.6
 
-### 1. Hierarquia de dispositivos corrigida
+### 1. Correção do erro de finalização `pdfGenerationProofs.push`
 
-- **Admin:** administra dispositivos de todos os perfis.
-- **Gestor:** visualiza e administra somente dispositivos de `operacional` e `verificador`.
-- Gestor não aprova, reativa, rejeita nem revoga dispositivo de outro gestor ou de administrador.
-- A mesma regra existe na listagem e nos endpoints do Worker.
+Foi corrigido o erro observado no celular:
 
-### 2. Proteção contra força bruta
+`Cannot read properties of undefined (reading 'push')`
 
-O Worker limita tentativas de login por dois escopos independentes:
+Agora toda tentativa reaproveitada é normalizada antes do uso. O array `integrity.pdfGenerationProofs` é criado quando estiver ausente, sem inventar hashes ou assinaturas.
 
-- matrícula normalizada;
-- endereço IP observado pelo Worker.
+Também foi corrigido o estado de **registro pendente**:
 
-Padrão adotado:
+- uma PET só é marcada como pendente depois de PDF + JSON existirem de fato;
+- o botão **Repetir envio pendente** só aparece quando os dois arquivos e seus hashes estão disponíveis no IndexedDB;
+- se a geração falhar antes disso, o formulário é preservado e o usuário deve apenas finalizar novamente.
 
-- 5 falhas por matrícula em 15 minutos;
-- 20 falhas por IP em 15 minutos;
-- bloqueio temporário de 15 minutos;
-- contadores apagados depois de login válido.
+### 2. Checklist: resposta obrigatória, sem forçar “Sim”
 
-Os identificadores de matrícula/IP são transformados em códigos opacos antes de serem gravados. Os limites podem ser alterados pelas variáveis opcionais `LOGIN_WINDOW_SECONDS`, `LOGIN_LOCK_SECONDS`, `LOGIN_MAX_ACCOUNT` e `LOGIN_MAX_IP`.
+Todos os 22 itens continuam obrigatórios, porém o usuário pode registrar a condição real:
 
-### 3. Registro de PET e participantes em lote
+- **Sim**;
+- **Não**;
+- **N/A**.
 
-O Worker monta um único `DB.batch()` com:
+O aplicativo não altera a resposta do usuário. A regra é separar **registro da condição** de **autorização da entrada**:
 
-- registro principal da PET;
-- todos os participantes;
-- atualização de uso do dispositivo.
+- respostas inseguras são aceitas durante o preenchimento;
+- ao avançar, o usuário recebe aviso quando aplicável;
+- na emissão oficial, condições impeditivas bloqueiam a PET;
+- todo N/A exige justificativa;
+- N/A em item crítico pode ser registrado, mas impede a emissão até revisão.
 
-Depois do lote, confere a quantidade realmente gravada. Se houver qualquer divergência, remove o conjunto e não retorna a PET como aceita. A coluna `participant_count` também é conferida na validação oficial.
+As mesmas regras de segurança continuam sendo repetidas no Worker para não depender somente do navegador.
 
-### 4. Limites defensivos
+### 3. Validação por etapa
 
-Frontend e Worker limitam:
+O formulário passou a validar cada etapa ao clicar em **Próxima etapa**.
 
-- 20 participantes no total;
-- 15 entrantes;
-- 4 vigias;
-- exatamente 1 supervisor;
-- tamanho da requisição, PDF, comprovante e imagens dos participantes;
-- nome e matrícula excessivamente longos.
-
-Fotos selecionadas são redimensionadas para reduzir consumo de memória, rede e banco.
-
-### 5. Armazenamento local reduzido e erro visível
-
-- `localStorage` mantém no máximo **30 referências compactas**, sem fotos, assinaturas ou dossiê completo.
-- PDF, comprovante e snapshot completo ficam no IndexedDB, separados por usuário.
-- Falha por falta de espaço agora gera aviso visível, em vez de interromper silenciosamente o fluxo.
-- Se a PET já tiver sido aceita pelo Worker, uma falha posterior no armazenamento local não transforma o registro oficial em pendência.
-- O app continua avisando que os arquivos locais são temporários e devem ser enviados imediatamente ao supervisor.
-
-### 6. Data local correta
-
-O campo de data usa o calendário local do aparelho (`getFullYear/getMonth/getDate`), e não UTC. Isso evita preencher o dia seguinte no período noturno de Uberlândia.
-
-### 7. Login tradicional por formulário
-
-Pressionar **Enter** na matrícula ou senha envia o formulário de login. O primeiro cadastro de administrador também usa um formulário próprio.
-
-### 8. Preenchimento guiado
-
-O formulário foi dividido em seis etapas:
+Fluxo:
 
 1. Identificação;
 2. Checklist;
@@ -91,62 +63,138 @@ O formulário foi dividido em seis etapas:
 5. Ciência;
 6. Finalização.
 
-Há indicador de progresso, botões de etapa, avançar/voltar e deslocamento automático para o primeiro campo ou bloco com erro.
+Quando há erro:
 
-### 9. Acessibilidade das medições
+- a etapa não avança;
+- a mensagem mostra o que deve ser corrigido;
+- o aplicativo leva o usuário ao primeiro campo/bloco relacionado ao erro.
 
-Os 12 campos da tabela de gases receberam nomes acessíveis específicos, e a tabela usa cabeçalhos de coluna e linha. O resultado da validação usa região `aria-live`.
+A validação completa é repetida antes da emissão oficial.
 
-### 10. Dependências de PDF e política de segurança
+### 4. Navegação móvel mais compacta
 
-- `html2canvas` 1.4.1 e `jsPDF` 4.2.1 são declarados no HTML com SRI, `crossorigin` e `referrerpolicy`.
-- O frontend inclui CSP no HTML e no arquivo `_headers` do Cloudflare Pages.
-- O app não injeta scripts de CDN dinamicamente.
-- A consulta de IP passou a usar o próprio Worker (`/client-context`), sem serviço público adicional.
+Os seis botões fixos de etapa foram removidos da área principal. A navegação utiliza:
 
-### 11. Frontend dividido em módulos
+- nome da etapa atual;
+- barra de progresso;
+- contador `etapa / total`;
+- botões **Voltar** e **Próxima etapa**.
 
-O antigo arquivo único foi separado em:
+Isso reduz a área ocupada no celular.
 
-- `app-core.js` — utilitários, criptografia e armazenamento;
-- `app-system.js` — login, usuários, dispositivos e API;
-- `app-form.js` — formulário, fotos, assinaturas, etapas e finalização;
-- `app-output.js` — PDF, histórico, compartilhamento, validação e inicialização.
+### 5. Checklist otimizado para celular
 
-Os arquivos continuam sendo scripts clássicos carregados, com `defer`, na ordem indicada pelo `index.html`.
+No desktop permanece a tabela tradicional. Em telas pequenas, cada item vira um cartão com três opções grandes:
 
-## Migração obrigatória do D1
+`Sim | Não | N/A`
 
-Depois da v1.1.4 e antes de publicar o Worker v1.1.5, execute **uma única vez**:
+A justificativa de N/A aparece no próprio cartão. Os controles móvel e desktop são sincronizados e geram o mesmo payload.
 
-```text
-migrations/0004_hardening_v115.sql
-```
+### 6. Supervisor informado uma única vez
 
-Ela cria `auth_rate_limits` e adiciona `participant_count` em `pet_records`.
+O campo “Supervisor de entrada” deixou de ser digitado na Identificação.
 
-Confirmação:
+O nome e a matrícula são obtidos automaticamente do participante com função **Supervisor de Entrada** cadastrado na etapa **Equipe**. Esses dados são copiados para o payload/PDF na finalização.
 
-```sql
-SELECT name FROM sqlite_master WHERE type='table' AND name='auth_rate_limits';
-PRAGMA table_info(pet_records);
-```
+Isso elimina divergência entre dois campos preenchidos manualmente.
 
-Não execute novamente o `ALTER TABLE` se `participant_count` já existir.
+### 7. Tela de login simplificada
 
-## Instalação resumida
+O acesso diário recebeu prioridade visual. A criação do primeiro administrador ficou recolhida em:
 
-1. Execute `migrations/0004_hardening_v115.sql` no D1.
-2. Substitua o código do Worker por `worker-pet-digital-api-v1.1.5.js` ou `worker/src/index.js`.
-3. Faça o deploy e teste `/health` e `/db-test`.
-4. Publique **todo o conteúdo** de `frontend/`, incluindo `_headers` e os quatro arquivos `app-*.js`.
-5. Reabra o Pages; o Service Worker v1.1.5 remove os caches anteriores.
-6. Execute o roteiro de `docs/INSTALACAO_E_TESTE.md`.
+**Configuração inicial do sistema**
+
+Ela continua disponível para implantação, mas não ocupa metade da tela de login.
+
+O botão **Entrar no sistema** fica desabilitado e mostra `Entrando...` enquanto aguarda a API. Isso evita cliques repetidos consumindo tentativas do limitador de login.
+
+### 8. Aba ativa destacada
+
+O menu superior destaca visualmente a área aberta e usa `aria-current="page"` para tecnologias assistivas.
+
+### 9. Menos botões na finalização
+
+Na etapa final ficam em destaque apenas as ações principais. Depois da emissão:
+
+- **Compartilhar PDF**;
+- **Compartilhar arquivo de validação (JSON)**.
+
+Ações secundárias ficam recolhidas em **Outras opções**.
+
+### 10. Terminologia de produção
+
+Na interface, “Comprovante técnico” foi substituído por:
+
+**Arquivo de validação da PET (JSON)**
+
+Termos criptográficos detalhados continuam concentrados em áreas de **Detalhes técnicos**.
+
+### 11. PDF sem bibliotecas externas
+
+A v1.1.6 remove `jsPDF`, `html2canvas` e qualquer script de CDN.
+
+O PDF é produzido localmente com APIs nativas do navegador:
+
+1. o aplicativo desenha as páginas em `Canvas 2D`;
+2. converte cada página para JPEG;
+3. monta localmente a estrutura PDF 1.4;
+4. calcula o SHA-256 dos bytes finais;
+5. gera o JSON correspondente;
+6. registra os dois hashes no Worker.
+
+Consequências:
+
+- nenhuma biblioteca de PDF é baixada de terceiros durante o uso;
+- `script-src` da CSP pode permanecer somente `'self'`;
+- o PDF continua contendo dados, checklist, medições, fotos, assinaturas e elementos de integridade.
+
+### 12. Segurança e endurecimentos da v1.1.5 mantidos
+
+Continuam ativos:
+
+- limite de tentativas de login por matrícula e IP;
+- hierarquia de administração de dispositivos;
+- limites de participantes e tamanho de requisição;
+- verificação de números negativos nas medições;
+- separação dos dados locais por usuário;
+- Service Worker limitado a arquivos estáticos;
+- registro do principal + participantes em `DB.batch()` e conferência posterior;
+- idempotência e conflito HTTP 409;
+- validação oficial por PDF + JSON + registro do D1 + chave autorizada.
+
+## D1 / migrations
+
+### Atualizando da v1.1.5 para a v1.1.6
+
+**Não há nova migration do D1.**
+
+Se `0004_hardening_v115.sql` já foi executada, não rode novamente.
+
+### Instalação nova ou atualização de versão anterior à v1.1.5
+
+Confira se as migrations existentes foram aplicadas na ordem necessária:
+
+- `0001_schema_v110.sql`
+- `0002_roles_v110.sql` — somente para base que ainda possua perfis antigos;
+- `0003_security_v114.sql`
+- `0004_hardening_v115.sql`
+
+## Instalação resumida da v1.1.6
+
+1. **Não altere o D1** se a v1.1.5 já estava funcionando.
+2. No Worker `pet-digital-api`, substitua o código pelo arquivo `worker-pet-digital-api-v1.1.6.js` ou por `worker/src/index.js`.
+3. Faça deploy do Worker.
+4. Teste:
+   - `/health`
+   - `/db-test`
+5. Publique **todo o conteúdo** de `frontend/` no Cloudflare Pages.
+6. Reabra o aplicativo. O Service Worker `pet-digital-static-v1.1.6` elimina caches antigos e atualiza os arquivos estáticos.
+7. Faça uma PET fictícia completa antes de liberar a versão para uso real.
 
 ## Estrutura
 
 ```text
-pet-digital-v1.1.5/
+pet-digital-v1.1.6/
 ├── frontend/
 │   ├── index.html
 │   ├── app-core.js
@@ -163,17 +211,30 @@ pet-digital-v1.1.5/
 │   ├── wrangler.toml
 │   └── package.json
 ├── migrations/
-│   ├── 0001_schema_v110.sql
-│   ├── 0002_roles_v110.sql
-│   ├── 0003_security_v114.sql
-│   └── 0004_hardening_v115.sql
 ├── docs/
-└── worker-pet-digital-api-v1.1.5.js
+└── worker-pet-digital-api-v1.1.6.js
 ```
 
-## Observações de homologação
+## Arquivos importantes para revisão do código
 
-- Faça primeiro emissões fictícias no ambiente real Pages/Worker/D1.
-- Confirme os limites de participantes e de N/A com a Segurança do Trabalho.
-- Teste câmera, geolocalização, compartilhamento e armazenamento nos aparelhos usados em campo.
-- Arquivos locais podem desaparecer; PDF e comprovante devem ser enviados ao supervisor logo após a emissão.
+- `frontend/app-core.js`: constantes, armazenamento, WebCrypto, IndexedDB e utilitários.
+- `frontend/app-system.js`: login, usuários, dispositivos, sessão e chamadas à API.
+- `frontend/app-form.js`: checklist, medições, participantes, assinatura, etapas e finalização.
+- `frontend/app-output.js`: criação do PDF, compartilhamento, histórico e validação.
+- `worker/src/index.js`: autenticação, autorização, validação independente e D1.
+
+Todos continuam comentados no padrão **O quê / Como / Quando**.
+
+## Pontos que ainda exigem homologação em campo
+
+Antes de considerar a versão definitiva:
+
+- testar câmera em Android/iPhone utilizados pela equipe;
+- testar assinatura com dedo em diferentes tamanhos de tela;
+- testar geolocalização permitida/negada;
+- testar rede instável durante a finalização e o botão de repetição pendente;
+- testar compartilhamento do PDF e JSON por WhatsApp/e-mail/app corporativo;
+- validar visualmente PDFs com 1, 5, 10 e 20 participantes;
+- confirmar com Segurança do Trabalho quais respostas “Não” e N/A devem permanecer impeditivas.
+
+> Os arquivos do dispositivo são temporários. Após a emissão oficial, PDF e Arquivo de validação da PET (JSON) devem ser encaminhados imediatamente ao supervisor responsável.

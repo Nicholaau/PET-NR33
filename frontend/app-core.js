@@ -1,6 +1,6 @@
 'use strict';
 /**
- * PET-Digital v1.1.5 — núcleo compartilhado.
+ * PET-Digital v1.1.6 — núcleo compartilhado.
  * O quê: constantes, utilitários, armazenamento local/IndexedDB e criptografia.
  * Como: declara as funções usadas pelos módulos carregados depois deste arquivo.
  * Quando: é o primeiro script do frontend.
@@ -8,7 +8,7 @@
 
 
 /**
- * PET Digital NR-33 v1.1.5 — frontend comentado.
+ * PET Digital NR-33 v1.1.6 — frontend comentado.
  *
  * Visão geral do arquivo:
  * - A interface é um PWA estático no Cloudflare Pages, mas a emissão oficial depende
@@ -16,7 +16,7 @@
  * - O estado temporário fica em memória; rascunhos e registros são separados por usuário
  *   no localStorage, enquanto PDF/JSON temporários ficam no IndexedDB do dispositivo.
  * - O fluxo principal é: login -> preencher -> validar -> gerar os arquivos finais ->
- *   recalcular os hashes reais -> registrar no Worker -> compartilhar PDF + comprovante.
+ *   recalcular os hashes reais -> registrar no Worker -> compartilhar PDF + arquivo de validação (JSON).
  * - Foto, assinatura desenhada, dados do formulário e prova de geração do PDF entram
  *   no material que é hasheado e assinado criptograficamente.
  *
@@ -25,13 +25,13 @@
  */
 
 // Versão funcional gravada no dossiê e exibida nos elementos de prova.
-const APP_VERSION = '1.1.5';
+const APP_VERSION = '1.1.6';
 
 // Perfil técnico aceito pelo próprio validador. Esses valores padronizam como o hash
 // é calculado, qual algoritmo assina o registro e como outro validador deve conferir.
 const VALIDATION_PROFILE = 'PET-DIGITAL-NR33-v1';
 const ACCEPTED_VALIDATION_PROFILES = new Set(['PET-DIGITAL-NR33-v1', 'PET-DIGITAL-NR33-PROOF/v1']);
-const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.1.5';
+const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.1.6';
 const RECORD_TYPE = 'PET-DIGITAL-DOSSIE/v1';
 const HASH_ALGORITHM = 'SHA-256';
 const SIGNATURE_ALGORITHM = 'ECDSA-P256-SHA256';
@@ -44,7 +44,7 @@ const SIGNATURE_MIN_BOUNDS = 8;
 
 
 // Chaves usadas no localStorage para separar rascunhos, registros finalizados e chave criptográfica.
-const STORAGE_DRAFT = 'petDigitalDraftV8';
+const STORAGE_DRAFT = 'petDigitalDraftV9';
 const STORAGE_RECORDS = 'petDigitalRecordsV2';
 const STORAGE_KEYPAIR = 'petDigitalKeyPairV2';
 const STORAGE_AUTH = 'petDigitalAuthV1';
@@ -75,9 +75,11 @@ const FORM_STEPS = [
   { number: 6, label: 'Finalização' }
 ];
 
-// Política de N/A: itens críticos nunca aceitam N/A; demais exigem justificativa.
-const MAX_NA_ITEMS = 5;
-const NA_FORBIDDEN_ITEMS = new Set(['01','02','03','05','06','08','10','11','12','14','16','17','18','22']);
+// Política de N/A v1.1.6: todos os itens podem ser preenchidos como S/N/N/A.
+// N/A sempre exige justificativa; nos itens críticos abaixo ele é aceito como registro,
+// mas impede a emissão oficial até que a condição seja revista/resolvida.
+const MAX_NA_ITEMS_WARNING = 8;
+const NA_CRITICAL_ITEMS = new Set(['01','02','03','05','06','08','10','11','12','14','16','17','18','22']);
 
 // Itens do checklist extraídos do modelo da PET. A tabela é renderizada dinamicamente a partir desta lista.
 const checklistItems = [
@@ -568,7 +570,7 @@ async function signPayloadHash(payloadHash) {
 
 /**
  * Verifica se uma assinatura criptográfica corresponde a um hash.
- * Ativação: tela 'Validar' ao importar um comprovante técnico.
+ * Ativação: tela 'Validar' ao importar um arquivo de validação da PET (JSON).
  * O que faz: importa a chave pública do dossiê e usa WebCrypto para confirmar se a
  * assinatura realmente foi feita sobre aquele hash.
  */

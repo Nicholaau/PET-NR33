@@ -1,6 +1,6 @@
 'use strict';
 /**
- * PET-Digital v1.1.5 — autenticação e administração.
+ * PET-Digital v1.1.6 — autenticação e administração.
  * O quê: login, sessão, usuários, dispositivos, permissões e chamadas da API.
  * Como: usa os utilitários do app-core.js e o Worker configurado em API_BASE_URL.
  * Quando: telas de acesso e Sistema.
@@ -122,7 +122,7 @@ function updateFormAccessStatus(message, type = 'warn') {
   }
   if (!state?.user) {
     box.className = 'validation-box warn';
-    box.textContent = 'Para emitir a PET oficial e gerar PDF/comprovante técnico, faça login na tela inicial.';
+    box.textContent = 'Para emitir a PET oficial e gerar PDF/arquivo de validação da PET (JSON), faça login na tela inicial.';
     return;
   }
   if (state.user.mustChangePassword) {
@@ -136,9 +136,9 @@ function updateFormAccessStatus(message, type = 'warn') {
 
 /**
  * Confere se a conta e o dispositivo podem emitir documento oficial.
- * O quê: bloqueia finalização/PDF/comprovante sem login e sem dispositivo autorizado.
+ * O quê: bloqueia finalização/PDF/arquivo de validação (JSON) sem login e sem dispositivo autorizado.
  * Como: gera ou lê a proteção local do dispositivo, consulta a API e verifica se o status está ativo.
- * Quando: antes de finalizar a PET, gerar PDF, compartilhar PDF ou salvar/compartilhar comprovante técnico.
+ * Quando: antes de finalizar a PET, gerar PDF, compartilhar PDF ou salvar/compartilhar arquivo de validação da PET (JSON).
  */
 async function ensureOfficialAccessOrGuide(actionLabel = 'continuar') {
   const state = authState || loadAuthState();
@@ -199,7 +199,7 @@ async function ensureOfficialAccessOrGuide(actionLabel = 'continuar') {
  * Garante que o documento já foi gerado e registrado como um conjunto único.
  * O quê: impede exportação de arquivo não vinculado ao servidor.
  * Como: exige serverRegistration e os arquivos temporários cujos hashes foram registrados.
- * Quando: antes de abrir, baixar ou compartilhar PDF/comprovante.
+ * Quando: antes de abrir, baixar ou compartilhar PDF/arquivo de validação (JSON).
  */
 async function ensureRecordReadyForOutput(record, actionLabel = 'gerar documento') {
   if (!record) return false;
@@ -237,23 +237,39 @@ async function setupFirstAdmin() {
 
 /** Faz login no Worker e guarda o token de sessão. */
 async function login() {
+  const button = $('#loginBtn');
+  if (button?.disabled) return;
   const matricula = normalizeText($('#loginMatricula').value);
   const password = $('#loginPassword').value;
   if (!matricula || !password) return alert('Informe matrícula e senha.');
-  const data = await apiFetch('/auth/login', { method: 'POST', body: { matricula, password } });
-  saveAuthState({ token: data.token, user: data.user, loggedAt: new Date().toISOString() });
-  $('#loginPassword').value = '';
-  purgeLegacySharedStorage();
-  loadUserWorkspace();
-  await refreshDevices(true);
-  if (data.user.mustChangePassword) {
-    showTab('systemTab');
-    updateFormAccessStatus('Altere a senha temporária antes da emissão oficial.', 'warn');
-    alert('Login realizado. Antes de emitir uma PET oficial, altere a senha temporária na área Minha conta.');
-    setTimeout(() => $('#currentPassword')?.focus(), 100);
-  } else {
-    showTab('formTab');
-    updateFormAccessStatus('Login realizado. Confira a situação deste dispositivo antes da emissão oficial.', 'ok');
+  const original = button?.textContent || 'Entrar no sistema';
+  if (button) {
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    button.textContent = 'Entrando...';
+  }
+  try {
+    const data = await apiFetch('/auth/login', { method: 'POST', body: { matricula, password } });
+    saveAuthState({ token: data.token, user: data.user, loggedAt: new Date().toISOString() });
+    $('#loginPassword').value = '';
+    purgeLegacySharedStorage();
+    loadUserWorkspace();
+    await refreshDevices(true);
+    if (data.user.mustChangePassword) {
+      showTab('systemTab');
+      updateFormAccessStatus('Altere a senha temporária antes da emissão oficial.', 'warn');
+      alert('Login realizado. Antes de emitir uma PET oficial, altere a senha temporária na área Minha conta.');
+      setTimeout(() => $('#currentPassword')?.focus(), 100);
+    } else {
+      showTab('formTab');
+      updateFormAccessStatus('Login realizado. Confira a situação deste dispositivo antes da emissão oficial.', 'ok');
+    }
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+      button.textContent = original;
+    }
   }
 }
 
@@ -599,7 +615,7 @@ async function validateHashOnServer(hash) {
   try {
     const data = await apiFetch('/validate', { method: 'POST', body: { payloadHash } });
     result.className = 'validation-box ' + (data.found ? 'ok' : 'warn');
-    result.textContent = data.found ? `Comprovante encontrado no sistema. Nº PET: ${data.record.numero_pet}. Recebido em: ${formatDateTime(data.record.server_received_at)}. Status: ${data.record.status}.` : 'Comprovante não encontrado no sistema.';
+    result.textContent = data.found ? `Registro encontrado no sistema. Nº PET: ${data.record.numero_pet}. Recebido em: ${formatDateTime(data.record.server_received_at)}. Status: ${data.record.status}.` : 'Registro não encontrado no sistema.';
   } catch (err) {
     result.className = 'validation-box bad';
     result.textContent = err.message;

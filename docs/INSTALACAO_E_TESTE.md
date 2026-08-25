@@ -1,116 +1,58 @@
-# Instalação e teste — PET-Digital v1.1.5
+# Instalação e teste — PET-Digital v1.1.6
 
 ## 1. D1
 
-Execute uma única vez:
+Se a v1.1.5 já está operando e `0004_hardening_v115.sql` foi executada, **não há migration nova**.
 
-```text
-migrations/0004_hardening_v115.sql
-```
-
-Confirme:
+Confirmação rápida:
 
 ```sql
-SELECT name FROM sqlite_master WHERE type='table' AND name='auth_rate_limits';
+SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;
 PRAGMA table_info(pet_records);
 ```
 
-A tabela deve existir e `pet_records` deve possuir `participant_count`.
-
 ## 2. Worker
 
-Substitua o código por:
+No Worker `pet-digital-api`, substitua o código atual por:
 
-```text
-worker-pet-digital-api-v1.1.5.js
-```
+`worker-pet-digital-api-v1.1.6.js`
 
-ou `worker/src/index.js`, e faça deploy.
+ou use `worker/src/index.js`.
 
-Teste:
+Faça deploy e teste:
 
-```text
-https://pet-digital-api.nicholas-dmae.workers.dev/health
-https://pet-digital-api.nicholas-dmae.workers.dev/db-test
-```
+- `https://pet-digital-api.nicholas-dmae.workers.dev/health`
+- `https://pet-digital-api.nicholas-dmae.workers.dev/db-test`
 
-Variáveis opcionais para alterar os limites de login:
-
-```text
-LOGIN_WINDOW_SECONDS = 900
-LOGIN_LOCK_SECONDS = 900
-LOGIN_MAX_ACCOUNT = 5
-LOGIN_MAX_IP = 20
-```
+O `/health` deve indicar DB e secrets configurados.
 
 ## 3. Pages
 
-Publique toda a pasta `frontend/`, incluindo `_headers`. Abra:
+Publique todo o conteúdo de `frontend/` em `https://pet-digital.pages.dev`.
 
-```text
-https://pet-digital.pages.dev
-```
+Não publique somente `index.html`: são necessários os quatro arquivos `app-*.js`, `_headers`, `sw.js`, CSS, manifesto e logo.
 
-O cache esperado é `pet-digital-static-v1.1.5`.
+## 4. Cache
 
-## 4. Testes de aceitação
+O cache esperado é:
 
-### Permissões de dispositivos
+`pet-digital-static-v1.1.6`
 
-1. Entre como gestor.
-2. Confirme que só aparecem dispositivos de operacional/verificador.
-3. Tente chamar manualmente o endpoint de dispositivo de gestor/admin: deve retornar `403`.
-4. Entre como admin e confirme acesso a todos.
+A v1.1.6 remove caches anteriores durante instalação/ativação do Service Worker.
 
-### Limite de login
+## 5. Roteiro de homologação
 
-1. Use uma conta de teste e erre a senha cinco vezes.
-2. Confirme resposta `429` e mensagem de bloqueio.
-3. Confirme registro em `auth_rate_limits`.
-4. Após o período ou limpeza controlada do registro de teste, faça login correto.
-
-### Registro completo
-
-1. Emita PET com vários participantes.
-2. Confirme `participant_count` igual ao número de linhas em `pet_participant_hashes`.
-3. Valide PDF + comprovante e confirme `participantSetComplete: true`.
-
-### Limites
-
-- tente adicionar mais de 15 entrantes, 4 vigias ou 20 participantes;
-- selecione foto maior que 12 MB;
-- envie requisição artificial acima dos limites do Worker;
-- confirme mensagens claras e ausência de registro incompleto.
-
-### Data local
-
-Em um aparelho configurado para Uberlândia, teste próximo da meia-noite. A data sugerida deve ser o dia local, não o dia UTC.
-
-### Login e formulário
-
-- pressione Enter no campo de senha;
-- percorra as seis etapas;
-- provoque erro em etapa anterior e clique Validar/Finalizar;
-- confirme que o app abre a etapa e desloca para o primeiro problema.
-
-### Acessibilidade
-
-Com leitor de tela ou ferramenta automática, confirme nomes dos 12 campos de gases e cabeçalhos de linha/coluna.
-
-### CSP/SRI/cache
-
-- confira os cabeçalhos de resposta do Pages;
-- confirme que os scripts da CDN apresentam `integrity`;
-- confirme que Cache Storage contém apenas os arquivos estáticos listados no `sw.js`;
-- confirme que `/auth/me`, `/users`, `/devices` e `/client-context` não são cacheados.
-
-### Armazenamento local
-
-- confirme que `localStorage` não contém fotos/assinaturas de registros finalizados;
-- confirme no máximo 30 referências;
-- simule cota cheia e verifique o aviso visível;
-- confirme que uma PET já aceita no Worker não volta ao estado pendente apenas porque a cópia local falhou.
-
-## 5. Observação
-
-Use PETs fictícias até concluir a homologação do fluxo no ambiente real e nos celulares da equipe.
+1. Login válido e inválido; verifique botão `Entrando...` e bloqueio de clique.
+2. Preencha uma etapa parcialmente e clique em Próxima; confirme foco no primeiro erro.
+3. Checklist: teste Sim, Não e N/A; N/A deve abrir justificativa.
+4. Teste N em condição impeditiva: deve ser possível registrar/avançar com alerta, mas a emissão deve ser bloqueada no final.
+5. Teste gases negativos: deve bloquear.
+6. Teste detector vencido: deve bloquear.
+7. Cadastre supervisor apenas na Equipe; confira preenchimento automático na Identificação/PDF.
+8. Capture fotos com rosto e crachá e registre todas as assinaturas.
+9. Finalize uma PET em rede estável; PDF + JSON devem ser gerados e registrados.
+10. Simule falha de rede depois da geração dos arquivos; só então deve aparecer repetição pendente.
+11. Tente clicar repetidamente em Finalizar; não deve criar nova PET.
+12. Valide PDF + JSON em conta verificador/gestor/admin.
+13. Confira visual do PDF com vários participantes.
+14. Compartilhe PDF e JSON pelo menu nativo do celular.

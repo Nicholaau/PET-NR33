@@ -168,7 +168,7 @@ th { background: #dde5ef; color: #172033; text-align: center; }
   .gas-table input { min-width: 0; width: 100%; }
 }
 
-/* Modo temporário usado pelo compartilhamento direto de PDF com html2canvas/jsPDF. */
+/* Estilos legados da área HTML de impressão; o PDF oficial v1.1.6 é gerado por Canvas/PDF nativo. */
 .print-area.pdf-render-mode { display: block !important; position: fixed; left: -10000px; top: 0; width: 297mm; background: #fff; z-index: -1; }
 .pdf-render-mode .print-page { width: 297mm; min-height: 210mm; border: 2px solid #333; padding: 6px; font-size: 10px; background: #fff; color: #000; page-break-after: always; }
 .pdf-render-mode .print-header { display: grid; grid-template-columns: 260px 1fr 150px; border-bottom: 2px solid #333; align-items: stretch; }
@@ -289,7 +289,7 @@ th { background: #dde5ef; color: #172033; text-align: center; }
 @media (max-width: 700px) { .verify-file-grid { grid-template-columns: 1fr; } }
 
 
-/* v1.1.5 — formulário guiado e acessibilidade móvel. */
+/* Base do formulário guiado; refinada na v1.1.6 abaixo. */
 .form-wizard { position: sticky; top: 76px; z-index: 8; background: #fff; border: 1px solid #c9d6e2; border-radius: 12px; padding: 12px; margin: 12px 0; box-shadow: 0 4px 14px rgba(0,0,0,.08); }
 .form-progress-head { display: grid; grid-template-columns: 1fr minmax(130px, 260px); gap: 12px; align-items: center; }
 .form-progress-head progress { width: 100%; height: 16px; }
@@ -308,4 +308,85 @@ th { background: #dde5ef; color: #172033; text-align: center; }
   .form-step-buttons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: visible; }
   .form-step-buttons button { min-width: 0; }
   [data-form-step] { scroll-margin-top: 205px; }
+}
+
+/* --------------------------------------------------------------------------
+ * v1.1.6 — refinamentos de produção e experiência móvel.
+ * O quê: menu ativo, login mais limpo, progresso compacto e checklist em cartões.
+ * Como: mantém a tabela completa no desktop e usa controles espelhados no celular.
+ * Quando: aplicado automaticamente pela folha de estilos desta versão.
+ * -------------------------------------------------------------------------- */
+.topbar nav button.active,
+.topbar nav button[aria-current="page"] {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(11, 58, 102, .12);
+}
+
+/* O primeiro acesso é uma função excepcional; não disputa espaço com o login diário. */
+.login-grid { grid-template-columns: 1fr; }
+.login-main-panel { max-width: 520px; width: 100%; margin: 0 auto; }
+.setup-panel { max-width: 520px; width: 100%; margin: 2px auto 0; }
+.setup-panel > details { border-top: 1px solid var(--line); padding-top: 10px; }
+.setup-panel summary { cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 700; text-align: center; }
+.setup-panel-content { margin-top: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--soft); }
+.login-panel button[aria-busy="true"] { cursor: wait; }
+
+/* Barra de progresso compacta: ocupa menos altura que seis botões fixos. */
+.form-wizard { top: 70px; padding: 9px 12px; }
+.form-progress-head { grid-template-columns: minmax(0, 1fr) minmax(120px, 220px); gap: 10px; }
+.form-progress-head strong { font-size: 14px; }
+.form-progress-head progress { height: 10px; accent-color: var(--primary-2); }
+.form-step-nav { margin-top: 7px; align-items: center; }
+.form-step-nav button { padding: 7px 11px; font-size: 13px; }
+.form-step-counter { color: var(--muted); font-size: 12px; font-weight: 800; }
+.step-validation { margin-top: 8px; border-radius: 9px; padding: 8px 10px; white-space: pre-wrap; font-size: 13px; }
+.step-validation.ok { color: var(--ok); background: #f0fdf4; border: 1px solid #86efac; }
+.step-validation.warn { color: var(--warning); background: #fffbeb; border: 1px solid #fcd34d; }
+.step-validation.bad { color: var(--danger); background: #fef2f2; border: 1px solid #fca5a5; }
+[data-form-step] { scroll-margin-top: 155px; }
+
+/* Supervisor preenchido pela própria etapa Equipe. */
+.auto-field { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; background: #f8fafc; min-height: 72px; }
+.auto-field strong { display: block; color: #29384a; font-size: 13px; margin-bottom: 8px; }
+.auto-field span { display: block; color: var(--primary); font-weight: 700; overflow-wrap: anywhere; }
+
+/* Checklist alternativo para celular. */
+.checklist-cards { display: none; }
+.check-card { border: 1px solid var(--line); border-radius: 14px; padding: 12px; margin: 0 0 10px; background: #fff; }
+.check-card legend { width: 100%; padding: 0 2px 6px; color: #24364b; font-weight: 700; line-height: 1.35; }
+.check-number { display: inline-flex; width: 30px; height: 30px; align-items: center; justify-content: center; border-radius: 50%; background: var(--primary); color: #fff; margin-right: 5px; font-size: 12px; }
+.check-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
+.check-options label { display: flex; min-height: 44px; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--line); border-radius: 10px; padding: 8px; background: var(--soft); cursor: pointer; }
+.check-options input { width: 20px; height: 20px; margin: 0; }
+.na-justification-mobile { margin-top: 10px; padding: 9px; border-radius: 10px; background: #fff8e8; }
+
+/* Ações finais: prioridade no compartilhamento; opções menos usadas ficam recolhidas. */
+.final-primary-actions, .document-share-actions { align-items: stretch; }
+.final-primary-actions > button, .document-share-actions > button { flex: 1 1 220px; }
+.output-more-actions { margin-top: 10px; }
+
+@media (max-width: 760px) {
+  .topbar { padding: 9px 10px; }
+  .topbar strong { font-size: 17px; }
+  .topbar span { display: none; }
+  .topbar nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin-top: 8px; }
+  .topbar nav button { padding: 7px 4px; font-size: 12px; min-width: 0; }
+
+  .form-wizard { position: sticky; top: 0; padding: 7px 9px; border-radius: 10px; }
+  .form-progress-head { grid-template-columns: 1fr 95px; gap: 8px; }
+  .form-progress-head strong { font-size: 12px; line-height: 1.2; }
+  .form-progress-head progress { height: 8px; }
+  .form-step-nav { margin-top: 5px; }
+  .form-step-nav button { padding: 6px 9px; font-size: 12px; }
+  [data-form-step] { scroll-margin-top: 105px; }
+
+  .checklist-desktop-wrap { display: none; }
+  .checklist-cards { display: block; }
+  .check-options { gap: 6px; }
+  .check-options label { min-height: 42px; padding: 6px 4px; font-size: 13px; }
+
+  .final-primary-actions, .document-share-actions { display: grid; grid-template-columns: 1fr; }
+  .final-primary-actions > button, .document-share-actions > button { width: 100%; }
 }
