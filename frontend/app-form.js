@@ -294,24 +294,25 @@ async function hasCompletePendingArtifacts(record) {
 
 /**
  * Renderiza o checklist e um campo de justificativa para cada resposta N/A.
- * O campo fica oculto até N/A ser escolhido; itens críticos aceitam o registro, mas bloqueiam a emissão oficial até revisão.
+ * O campo fica oculto até N/A ser escolhido. A alternativa selecionada (Sim, Não ou N/A)
+ * não bloqueia a emissão; o sistema exige apenas que todos os itens sejam respondidos e
+ * que N/A tenha uma justificativa objetiva, sem tamanho mínimo.
  */
 function renderChecklist() {
   const container = $('#checklistCards');
   const tbody = $('#checklistTable tbody');
   const htmlRows = checklistItems.map((item, index) => {
     const n = String(index + 1).padStart(2, '0');
-    const critical = NA_CRITICAL_ITEMS.has(n);
     return `<tr data-check-row="${n}">
       <td>${n}</td>
-      <td>${escapeHtml(item)}${critical ? '<br><small class="critical-note">Se N/A for necessário, justifique. Em item crítico, a emissão oficial ficará bloqueada até revisão.</small>' : ''}</td>
+      <td>${escapeHtml(item)}</td>
       <td><input required type="radio" name="check_${n}" value="S" aria-label="Item ${n}: Sim" /></td>
       <td><input required type="radio" name="check_${n}" value="N" aria-label="Item ${n}: Não" /></td>
       <td><input required type="radio" name="check_${n}" value="NA" aria-label="Item ${n}: Não se aplica" /></td>
     </tr>
     <tr class="na-justification-row hidden" data-na-row="${n}">
       <td></td><td colspan="4"><label>Justificativa do N/A — item ${n}
-        <input name="check_${n}_justification" minlength="10" maxlength="300" placeholder="Explique objetivamente por que o item não se aplica" />
+        <input name="check_${n}_justification" maxlength="300" placeholder="Explique objetivamente por que o item não se aplica" />
       </label></td>
     </tr>`;
   }).join('');
@@ -322,17 +323,15 @@ function renderChecklist() {
   if (container) {
     container.innerHTML = checklistItems.map((item, index) => {
       const n = String(index + 1).padStart(2, '0');
-      const critical = NA_CRITICAL_ITEMS.has(n);
       return `<fieldset class="check-card" data-check-card="${n}">
         <legend><span class="check-number">${n}</span> ${escapeHtml(item)}</legend>
-        ${critical ? '<p class="critical-note">N/A pode ser registrado com justificativa, mas este item precisa ser revisto antes da emissão oficial.</p>' : ''}
         <div class="check-options" role="radiogroup" aria-label="Resposta do item ${n}">
           <label><input required type="radio" name="check_mobile_${n}" value="S" data-check-mobile="${n}" /> <span>Sim</span></label>
           <label><input required type="radio" name="check_mobile_${n}" value="N" data-check-mobile="${n}" /> <span>Não</span></label>
           <label><input required type="radio" name="check_mobile_${n}" value="NA" data-check-mobile="${n}" /> <span>N/A</span></label>
         </div>
         <label class="na-justification-mobile hidden" data-na-card="${n}">Justificativa do N/A
-          <input data-check-mobile-justification="${n}" minlength="10" maxlength="300" placeholder="Explique por que o item não se aplica" />
+          <input data-check-mobile-justification="${n}" maxlength="300" placeholder="Explique por que o item não se aplica" />
         </label>
       </fieldset>`;
     }).join('');
@@ -1025,7 +1024,7 @@ function buildPayload(existingPetNumber = '') {
     professionals: collectPeople(),
     regulatoryNotice: {
       nr33: 'Permissão de Entrada e Trabalho para espaços confinados; registros devem ser mantidos pela organização.',
-      validationCriteria: 'O2 > 19,5 e < 23; LIE < 10; H2S < 5 ppm; CO < 25 ppm; todos os itens do checklist respondidos; N/A justificado; condições inseguras impedem a emissão oficial.'
+      validationCriteria: 'O2 > 19,5 e < 23; LIE < 10; H2S < 5 ppm; CO < 25 ppm; todos os itens do checklist respondidos; N/A com justificativa. As alternativas Sim, Não e N/A são registradas conforme informado e não bloqueiam a emissão por si só.'
     }
   };
 }
@@ -1057,36 +1056,42 @@ function checklistIssueTarget(number, kind = 'radio') {
   return mobile ? $(`[data-check-mobile="${number}"]`) : $(`input[name="check_${number}"]`);
 }
 
-/** Valida o checklist; respostas reais são registráveis, mas a segurança só bloqueia na emissão oficial. */
+/**
+ * Valida o checklist.
+ * O quê: exige que todos os itens recebam uma resposta e que N/A possua justificativa.
+ * Como: aceita Sim, Não e N/A como respostas válidas; nenhuma dessas alternativas, por si só,
+ * bloqueia o avanço ou a emissão. Situações que merecem atenção aparecem somente como aviso.
+ * Quando: ao avançar da etapa 2 e novamente na finalização.
+ */
 function validateChecklistSection({ finalSafety = false } = {}) {
   const checklist = collectChecklist();
   const errors = [];
   const warnings = [];
   let firstInvalid = null;
+
   checklist.forEach(c => {
     if (!c.answer) {
       errors.push(`Item ${c.number}: selecione Sim, Não ou N/A.`);
       if (!firstInvalid) firstInvalid = checklistIssueTarget(c.number);
     }
-    if (c.answer === 'NA' && normalizeText(c.justification).length < 10) {
-      errors.push(`Item ${c.number}: justifique o N/A com pelo menos 10 caracteres.`);
+    if (c.answer === 'NA' && !normalizeText(c.justification)) {
+      errors.push(`Item ${c.number}: informe uma justificativa para N/A.`);
       if (!firstInvalid) firstInvalid = checklistIssueTarget(c.number, 'justification');
     }
   });
+
   const naItems = checklist.filter(c => c.answer === 'NA');
-  if (naItems.length > MAX_NA_ITEMS_WARNING) warnings.push(`Há ${naItems.length} itens marcados N/A. Revise se todos realmente não se aplicam.`);
+  if (naItems.length > MAX_NA_ITEMS_WARNING) {
+    warnings.push(`Há ${naItems.length} itens marcados N/A. Confira se as respostas correspondem à condição observada.`);
+  }
 
   const answer = number => checklist.find(c => c.number === number)?.answer;
-  const unsafeNo = checklist.filter(c => c.answer === 'N' && !['12','15','20'].includes(c.number));
-  const criticalNa = checklist.filter(c => c.answer === 'NA' && NA_CRITICAL_ITEMS.has(c.number));
-  const safetyMessages = [];
-  if (unsafeNo.length) safetyMessages.push(`Há ${unsafeNo.length} item(ns) de segurança marcado(s) como NÃO (${unsafeNo.map(c => c.number).join(', ')}).`);
-  if (answer('12') === 'S') safetyMessages.push('Item 12 indica atmosfera IPVS. A entrada não pode ser autorizada enquanto essa condição existir.');
-  if (criticalNa.length) safetyMessages.push(`N/A em item(ns) crítico(s): ${criticalNa.map(c => c.number).join(', ')}. Revise antes da emissão oficial.`);
-  if (answer('15') === 'S' && answer('19') !== 'S') safetyMessages.push('Item 15 indica necessidade de ar mandado, mas o item 19 não confirma a linha de ar instalada e operando.');
-  if (answer('20') === 'S') warnings.push('Item 20 indica necessidade de ferramentas intrinsecamente seguras. Confirme a especificação antes da entrada.');
-  if (finalSafety) errors.push(...safetyMessages);
-  else warnings.push(...safetyMessages.map(message => `${message} Você pode continuar preenchendo, mas a emissão oficial ficará bloqueada até correção/revisão.`));
+  const negativeItems = checklist.filter(c => c.answer === 'N');
+  if (negativeItems.length) warnings.push(`Há ${negativeItems.length} item(ns) marcado(s) como NÃO (${negativeItems.map(c => c.number).join(', ')}).`);
+  if (answer('12') === 'S') warnings.push('O item 12 registra atmosfera IPVS. Verifique as medidas de segurança aplicáveis antes da entrada.');
+  if (answer('15') === 'S' && answer('19') !== 'S') warnings.push('O item 15 registra necessidade de ar mandado e o item 19 não está marcado como Sim. Confira a condição registrada.');
+  if (answer('20') === 'S') warnings.push('O item 20 registra necessidade de ferramentas intrinsecamente seguras. Confira a especificação utilizada.');
+
   return { errors, warnings, firstInvalid, checklist };
 }
 

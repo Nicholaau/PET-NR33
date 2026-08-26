@@ -46,3 +46,12 @@ Não há nova migration para quem já está na v1.1.5.
 - A função usa `todayISO()` e `nowTime()` e, portanto, mantém a data/hora local do dispositivo.
 - Corrigido o erro `setDefaultDateTime is not defined` observado após login.
 - Cache estático alterado para `pet-digital-static-v1.1.6-hotfix1` para impedir reutilização do JavaScript quebrado.
+
+
+## Hotfix 2 — checklist
+- Removidos bloqueios de emissão decorrentes apenas de respostas Sim/Não/N/A do checklist.
+- Mantida a obrigatoriedade de responder os 22 itens.
+- N/A continua exigindo justificativa, agora sem mínimo de 10 caracteres.
+- Respostas de atenção aparecem como avisos, não como impeditivos.
+- Worker aplica a mesma regra do frontend.
+- Cache atualizado para `pet-digital-static-v1.1.6-hotfix2`.

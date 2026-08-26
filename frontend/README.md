@@ -36,3 +36,7 @@ O PDF é desenhado com Canvas 2D e montado localmente como PDF 1.4. Nenhum scrip
 ## Hotfix 1
 
 Restaurada `setDefaultDateTime()` em `app-core.js` e atualizado o cache do Service Worker para evitar que aparelhos continuem carregando a versão quebrada.
+
+
+## Hotfix 2
+O checklist exige resposta em todos os itens, mas Sim/Não/N/A não bloqueiam a emissão por si só. N/A exige justificativa sem comprimento mínimo.

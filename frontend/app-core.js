@@ -75,11 +75,11 @@ const FORM_STEPS = [
   { number: 6, label: 'Finalização' }
 ];
 
-// Política de N/A v1.1.6: todos os itens podem ser preenchidos como S/N/N/A.
-// N/A sempre exige justificativa; nos itens críticos abaixo ele é aceito como registro,
-// mas impede a emissão oficial até que a condição seja revista/resolvida.
+// Política do checklist — hotfix 2:
+// todos os 22 itens exigem uma resposta (Sim, Não ou N/A), sem bloquear a emissão
+// por causa da alternativa escolhida. N/A continua exigindo uma justificativa, mas
+// basta existir texto; não há quantidade mínima de caracteres.
 const MAX_NA_ITEMS_WARNING = 8;
-const NA_CRITICAL_ITEMS = new Set(['01','02','03','05','06','08','10','11','12','14','16','17','18','22']);
 
 // Itens do checklist extraídos do modelo da PET. A tabela é renderizada dinamicamente a partir desta lista.
 const checklistItems = [

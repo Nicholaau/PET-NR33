@@ -1,5 +1,20 @@
 # PET-Digital NR-33 v1.1.6 — Cloudflare comentado
 
+
+
+## Hotfix 2 — checklist sem bloqueio por resposta
+
+Esta revisão ajusta a regra operacional do checklist conforme os testes de campo:
+
+- os 22 itens continuam obrigatórios;
+- cada item aceita **Sim**, **Não** ou **N/A** sem bloquear a emissão apenas por causa da alternativa escolhida;
+- respostas que mereçam atenção continuam aparecendo como **avisos**, para não esconder a condição registrada;
+- quando **N/A** for selecionado, a justificativa continua obrigatória, porém **não há quantidade mínima de caracteres**;
+- a mesma regra foi aplicada no frontend e no Worker, evitando divergência entre o celular e a validação do servidor;
+- o cache foi atualizado para `pet-digital-static-v1.1.6-hotfix2`.
+
+Não há migration nova do D1 para este hotfix.
+
 > **Hotfix 1 — 25/08/2026:** restaurada a função `setDefaultDateTime()` no `app-core.js`.
 > O erro aparecia depois de um login válido porque o fluxo carregava o espaço de trabalho e chamava uma função que havia sido removida acidentalmente durante a modularização da v1.1.6. A data continua sendo obtida do relógio local do aparelho, não de UTC. O cache do Service Worker foi alterado para `pet-digital-static-v1.1.6-hotfix1` para forçar a atualização do JavaScript nos aparelhos.
 

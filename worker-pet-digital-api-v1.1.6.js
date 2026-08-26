@@ -1066,7 +1066,6 @@ async function verifyEcdsaSignature(publicKeyJwk, messageHashHex, signatureBase6
 }
 
 /** Regras de N/A compartilhadas com o frontend. */
-const NA_CRITICAL_ITEMS = new Set(['01','02','03','05','06','08','10','11','12','14','16','17','18','22']);
 
 /**
  * O quê: valida no servidor as condições mínimas de segurança contidas no payload assinado.
@@ -1127,16 +1126,15 @@ async function validatePetPayloadSafety(payload) {
     if (!['S','N','NA'].includes(c?.answer)) errors.push(`Item ${number} sem resposta válida.`);
     if (c?.answer === 'NA') {
       naCount++;
-      if (NA_CRITICAL_ITEMS.has(number)) errors.push(`Item ${number} é crítico: N/A foi registrado, mas impede a emissão oficial até revisão.`);
-      if (clean(c.justification || '').length < 10) errors.push(`Item ${number} marcado N/A sem justificativa suficiente.`);
+      if (!clean(c.justification || '')) errors.push(`Item ${number} marcado N/A sem justificativa.`);
     }
   }
 
-  const answer = n => checklist.find(c => String(c.number).padStart(2, '0') === n)?.answer;
-  const negativeBlocking = checklist.filter(c => c.answer === 'N' && !['12','15','20'].includes(String(c.number).padStart(2, '0')));
-  if (negativeBlocking.length) errors.push('Há item de controle impeditivo marcado como NÃO.');
-  if (answer('12') === 'S') errors.push('O item 12 informa atmosfera IPVS; a entrada não pode ser autorizada.');
-  if (answer('15') === 'S' && answer('19') !== 'S') errors.push('Ar mandado necessário sem linha de ar instalada e operando.');
+  // As respostas do checklist representam o que foi efetivamente verificado em campo.
+  // Sim, Não e N/A são aceitos pelo servidor; o Worker exige apenas resposta válida em
+  // todos os itens e justificativa não vazia quando N/A for selecionado. Regras técnicas
+  // independentes do checklist (ex.: medições atmosféricas, detector e participantes)
+  // continuam sendo validadas normalmente.
 
   if (!clean(fields.detectorId)) errors.push('Identificador do detector obrigatório.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(clean(fields.detectorCalibracao) || '')) errors.push('Data de calibração/validade do detector obrigatória.');
