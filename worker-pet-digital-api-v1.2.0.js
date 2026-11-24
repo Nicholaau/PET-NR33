@@ -1,5 +1,12 @@
 /**
- * PET-Digital NR-33 v1.1.6 — Worker/API Cloudflare comentado.
+ * PET-Digital NR-33 v1.2.0 — Worker/API Cloudflare comentado.
+ *
+ * Mudanças da v1.2.0:
+ * - CORS aceita também os endereços de publicação de teste do Pages (ex.: https://abc123.pet-digital.pages.dev),
+ *   o que permite homologar uma versão antes de promovê-la. Pode ser desligado com CORS_ALLOW_PREVIEWS = "false".
+ * - CORS_ALLOWED_ORIGIN aceita mais de uma origem, separadas por vírgula.
+ * - /db-test passou a exigir login de administrador.
+ * - /health informa a versão da API.
  *
  * O que é este arquivo?
  * - É a API backend do PET-Digital. Ele roda no Cloudflare Worker.
@@ -62,6 +69,7 @@ const ACCEPTED_VALIDATION_PROFILES = new Set(['PET-DIGITAL-NR33-v1', 'PET-DIGITA
 const CANONICALIZATION_ALGORITHM = 'JSON_CANONICAL_STABLE_STRINGIFY_V1';
 const HASH_ALGORITHM = 'SHA-256';
 const SIGNATURE_ALGORITHM = 'ECDSA-P256-SHA256';
+const API_VERSION = '1.2.0';
 
 export default {
   /**
@@ -95,13 +103,14 @@ async function route(request, env, url) {
   const path = normalizePath(url.pathname);
 
   if (request.method === 'GET' && path === '/') {
-    return json({ ok: true, app: env.APP_NAME || 'PET-DIGITAL-NR33', message: 'API PET-Digital NR-33 ativa.', routes: ['/health', '/db-test'] });
+    return json({ ok: true, app: env.APP_NAME || 'PET-DIGITAL-NR33', version: API_VERSION, message: 'API PET-Digital NR-33 ativa.', routes: ['/health'] });
   }
 
   if (request.method === 'GET' && path === '/health') {
     return json({
       ok: true,
       app: env.APP_NAME || null,
+      version: API_VERSION,
       environment: env.APP_ENV || null,
       validationProfile: env.VALIDATION_PROFILE || null,
       dbBindingConfigured: !!env.DB,
@@ -112,6 +121,8 @@ async function route(request, env, url) {
   }
 
   if (request.method === 'GET' && path === '/db-test') {
+    // v1.2.0: a lista de tabelas só é exibida para administrador autenticado.
+    await requireRole(request, env, ['admin']);
     const result = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all();
     return json({ ok: true, tables: result.results.map(r => r.name) });
   }
@@ -1269,9 +1280,13 @@ async function audit(env, actorUserId, action, entityType, entityId, result, req
  * Quando: em toda requisição, antes de responder ao navegador.
  */
 function buildCorsHeaders(request, env) {
-  const origin = request.headers.get('origin') || '';
-  const allowed = String(env.CORS_ALLOWED_ORIGIN || '').replace(/\/$/, '');
-  const allowOrigin = allowed === '*' ? '*' : (origin && origin.replace(/\/$/, '') === allowed ? origin : allowed || '*');
+  const origin = (request.headers.get('origin') || '').replace(/\/$/, '');
+  const allowedList = String(env.CORS_ALLOWED_ORIGIN || '').split(',').map(v => v.trim().replace(/\/$/, '')).filter(Boolean);
+  const allowPreviews = String(env.CORS_ALLOW_PREVIEWS ?? 'true').toLowerCase() !== 'false';
+  let allowOrigin;
+  if (!allowedList.length || allowedList.includes('*')) allowOrigin = '*';
+  else if (origin && (allowedList.includes(origin) || (allowPreviews && isPagesPreviewOf(origin, allowedList)))) allowOrigin = origin;
+  else allowOrigin = allowedList[0];
   return {
     'Access-Control-Allow-Origin': allowOrigin,
     'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
@@ -1280,6 +1295,26 @@ function buildCorsHeaders(request, env) {
     'Vary': 'Origin',
     'Content-Type': 'application/json; charset=utf-8'
   };
+}
+
+/**
+ * Confere se a origem é uma publicação de teste do mesmo projeto Pages.
+ * Ex.: https://90c5aba6.pet-digital.pages.dev é aceita quando https://pet-digital.pages.dev é permitida.
+ * Só vale para domínios *.pages.dev, com um único rótulo antes do nome do projeto.
+ */
+function isPagesPreviewOf(origin, allowedList) {
+  let url;
+  try { url = new URL(origin); } catch { return false; }
+  if (url.protocol !== 'https:') return false;
+  return allowedList.some(allowed => {
+    let base;
+    try { base = new URL(allowed); } catch { return false; }
+    if (base.protocol !== 'https:' || !base.hostname.endsWith('.pages.dev')) return false;
+    const suffix = '.' + base.hostname;
+    if (!url.hostname.endsWith(suffix)) return false;
+    const label = url.hostname.slice(0, -suffix.length);
+    return /^[a-z0-9-]{1,63}$/.test(label);
+  });
 }
 
 /**

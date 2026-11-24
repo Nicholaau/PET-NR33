@@ -1,0 +1,17 @@
+{
+  "name": "pet-digital-testes",
+  "version": "1.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Testes automáticos da PET-Digital NR-33 (Worker + aplicativo), sem Cloudflare.",
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "test": "node --no-warnings --test --test-concurrency=1 api.test.mjs e2e.test.mjs",
+    "test:api": "node --no-warnings --test api.test.mjs",
+    "test:app": "node --no-warnings --test e2e.test.mjs",
+    "servidor": "node --no-warnings servidor-local.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.50.0"
+  }
+}

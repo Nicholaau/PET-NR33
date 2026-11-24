@@ -1,58 +1,51 @@
-# Instalação e teste — PET-Digital v1.1.6
+# Instalação — PET-Digital v1.2.0
+
+## 0. Antes de publicar
+
+Rode os testes automáticos (ver `docs/COMO_TESTAR.md`):
+
+```bash
+cd testes && npm install && npx playwright install chromium && npm test
+```
+
+Só publique com `fail 0`.
 
 ## 1. D1
 
-Se a v1.1.5 já está operando e `0004_hardening_v115.sql` foi executada, **não há migration nova**.
+**Não há migration nova.** Se a v1.1.5 ou v1.1.6 já está funcionando, não altere o banco.
 
-Confirmação rápida:
-
-```sql
-SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;
-PRAGMA table_info(pet_records);
-```
+Instalação nova: rode `0001_schema_v110.sql`, `0003_security_v114.sql` e `0004_hardening_v115.sql`, nessa ordem. A `0002` só serve para bases antigas com perfis antigos.
 
 ## 2. Worker
 
-No Worker `pet-digital-api`, substitua o código atual por:
-
-`worker-pet-digital-api-v1.1.6.js`
-
-ou use `worker/src/index.js`.
-
-Faça deploy e teste:
-
-- `https://pet-digital-api.nicholas-dmae.workers.dev/health`
-- `https://pet-digital-api.nicholas-dmae.workers.dev/db-test`
-
-O `/health` deve indicar DB e secrets configurados.
+1. No Worker `pet-digital-api`, substitua o código por `worker-pet-digital-api-v1.2.0.js` (ou `worker/src/index.js`).
+2. Variáveis: as mesmas da v1.1.6. Novidade opcional: `CORS_ALLOW_PREVIEWS`.
+   - sem a variável ou com `"true"`: aceita `https://pet-digital.pages.dev` e as publicações de teste `https://<id>.pet-digital.pages.dev`;
+   - `"false"`: aceita só o endereço principal.
+3. Publique (Deploy).
+4. Abra `https://pet-digital-api.nicholas-dmae.workers.dev/health` e confira:
+   - `"version": "1.2.0"`;
+   - `dbBindingConfigured`, `sessionSecretConfigured`, `passwordPepperConfigured` como `true`.
+5. `/db-test` agora responde `401` sem login de administrador. É o esperado.
 
 ## 3. Pages
 
-Publique todo o conteúdo de `frontend/` em `https://pet-digital.pages.dev`.
+1. Publique **todo** o conteúdo de `frontend/` (os quatro `app-*.js`, `index.html`, `styles.css`, `sw.js`, `_headers`, `manifest.json` e o logotipo).
+2. Abra `https://pet-digital.pages.dev` no computador e no celular.
+3. Se aparecer “Nova versão disponível”, toque em **Atualizar agora**. Se continuar a versão antiga, feche a aba e abra de novo.
+4. Em **Conta**, confira “PET Digital versão 1.2.0”.
 
-Não publique somente `index.html`: são necessários os quatro arquivos `app-*.js`, `_headers`, `sw.js`, CSS, manifesto e logo.
+> Na primeira abertura da v1.2.0, cada usuário precisa entrar de novo uma vez. Os rascunhos continuam salvos.
 
-## 4. Cache
+## 4. Conferência rápida depois de publicar
 
-O cache esperado é:
+1. Entrar e sair; entrar de novo e fechar/abrir o app (deve continuar conectado).
+2. Fazer uma PET fictícia completa e conferir o PDF (página 2: detector, N/A e ciência).
+3. Validar essa PET na aba Gestão com o PDF e o arquivo de validação.
+4. Seguir o roteiro de campo em `docs/COMO_TESTAR.md`, seção 4.
 
-`pet-digital-static-v1.1.6`
+## 5. Voltar à versão anterior (se necessário)
 
-A v1.1.6 remove caches anteriores durante instalação/ativação do Service Worker.
-
-## 5. Roteiro de homologação
-
-1. Login válido e inválido; verifique botão `Entrando...` e bloqueio de clique.
-2. Preencha uma etapa parcialmente e clique em Próxima; confirme foco no primeiro erro.
-3. Checklist: teste Sim, Não e N/A; N/A deve abrir justificativa.
-4. Teste N em condição impeditiva: deve ser possível registrar/avançar com alerta, mas a emissão deve ser bloqueada no final.
-5. Teste gases negativos: deve bloquear.
-6. Teste detector vencido: deve bloquear.
-7. Cadastre supervisor apenas na Equipe; confira preenchimento automático na Identificação/PDF.
-8. Capture fotos com rosto e crachá e registre todas as assinaturas.
-9. Finalize uma PET em rede estável; PDF + JSON devem ser gerados e registrados.
-10. Simule falha de rede depois da geração dos arquivos; só então deve aparecer repetição pendente.
-11. Tente clicar repetidamente em Finalizar; não deve criar nova PET.
-12. Valide PDF + JSON em conta verificador/gestor/admin.
-13. Confira visual do PDF com vários participantes.
-14. Compartilhe PDF e JSON pelo menu nativo do celular.
+- Worker: publique de novo o código da v1.1.6.
+- Pages: no painel, promova a publicação anterior (“Rollback”).
+- Banco: nada a desfazer.

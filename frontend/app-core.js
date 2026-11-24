@@ -1,6 +1,6 @@
 'use strict';
 /**
- * PET-Digital v1.1.6 — núcleo compartilhado.
+ * PET-Digital v1.2.0 — núcleo compartilhado.
  * O quê: constantes, utilitários, armazenamento local/IndexedDB e criptografia.
  * Como: declara as funções usadas pelos módulos carregados depois deste arquivo.
  * Quando: é o primeiro script do frontend.
@@ -8,7 +8,7 @@
 
 
 /**
- * PET Digital NR-33 v1.1.6 — frontend comentado.
+ * PET Digital NR-33 v1.2.0 — frontend comentado.
  *
  * Visão geral do arquivo:
  * - A interface é um PWA estático no Cloudflare Pages, mas a emissão oficial depende
@@ -25,13 +25,13 @@
  */
 
 // Versão funcional gravada no dossiê e exibida nos elementos de prova.
-const APP_VERSION = '1.1.6';
+const APP_VERSION = '1.2.0';
 
 // Perfil técnico aceito pelo próprio validador. Esses valores padronizam como o hash
 // é calculado, qual algoritmo assina o registro e como outro validador deve conferir.
 const VALIDATION_PROFILE = 'PET-DIGITAL-NR33-v1';
 const ACCEPTED_VALIDATION_PROFILES = new Set(['PET-DIGITAL-NR33-v1', 'PET-DIGITAL-NR33-PROOF/v1']);
-const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.1.6';
+const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.2.0';
 const RECORD_TYPE = 'PET-DIGITAL-DOSSIE/v1';
 const HASH_ALGORITHM = 'SHA-256';
 const SIGNATURE_ALGORITHM = 'ECDSA-P256-SHA256';
@@ -48,6 +48,9 @@ const STORAGE_DRAFT = 'petDigitalDraftV9';
 const STORAGE_RECORDS = 'petDigitalRecordsV2';
 const STORAGE_KEYPAIR = 'petDigitalKeyPairV2';
 const STORAGE_AUTH = 'petDigitalAuthV1';
+// v1.2.0: guarda qual tentativa de emissão ficou gerada e ainda não registrada no servidor.
+// Impede que o mesmo serviço vire duas PETs com números diferentes depois de uma falha de envio.
+const STORAGE_PENDING = 'petDigitalPendingAttemptV1';
 const API_BASE_URL = 'https://pet-digital-api.nicholas-dmae.workers.dev';
 const FRONTEND_ORIGIN = 'https://pet-digital.pages.dev';
 const KEY_DB_NAME = 'petDigitalCryptoDbV2';
@@ -69,11 +72,30 @@ const PHOTO_JPEG_QUALITY = 0.72;
 const FORM_STEPS = [
   { number: 1, label: 'Identificação' },
   { number: 2, label: 'Checklist' },
-  { number: 3, label: 'Atmosfera' },
+  { number: 3, label: 'Medições de gases' },
   { number: 4, label: 'Equipe' },
   { number: 5, label: 'Ciência' },
-  { number: 6, label: 'Finalização' }
+  { number: 6, label: 'Revisão' }
 ];
+
+// Limites de liberação da atmosfera, usados na indicação ao lado de cada campo,
+// na validação da etapa 3, na revisão e no PDF. O Worker repete a mesma regra.
+const GAS_LIMITS = [
+  { key: 'o2', label: 'Oxigênio (O₂)', short: 'O₂', unit: '%', limitText: 'entre 19,5 e 23', ok: v => v > 19.5 && v < 23 },
+  { key: 'lie', label: 'Inflamáveis', short: 'LIE', unit: '% LIE', limitText: 'abaixo de 10', ok: v => v < 10 },
+  { key: 'h2s', label: 'Sulfeto de hidrogênio (H₂S)', short: 'H₂S', unit: 'ppm', limitText: 'abaixo de 5', ok: v => v < 5 },
+  { key: 'co', label: 'Monóxido de carbono (CO)', short: 'CO', unit: 'ppm', limitText: 'abaixo de 25', ok: v => v < 25 }
+];
+
+// v1.2.0: agrupamento visual do checklist por assunto. A numeração e o texto dos
+// 22 itens continuam os mesmos do modelo; muda apenas a ordem de exibição na tela.
+const CHECKLIST_GROUPS = [
+  { title: 'Equipe, EPI e saúde', items: ['01', '02', '03', '04', '06', '07'] },
+  { title: 'Isolamento, energias e acessos', items: ['08', '09', '16', '21'] },
+  { title: 'Atmosfera e ventilação', items: ['10', '11', '12', '13', '14', '15', '17', '18', '19', '20'] },
+  { title: 'Resgate', items: ['05', '22'] }
+];
+const CHECKLIST_DISPLAY_ORDER = CHECKLIST_GROUPS.flatMap(group => group.items);
 
 // Política do checklist — hotfix 2:
 // todos os 22 itens exigem uma resposta (Sim, Não ou N/A), sem bloquear a emissão
@@ -107,11 +129,12 @@ const checklistItems = [
   'Foram definidas as formas de resgate e transporte em caso de acidente?'
 ];
 
-// Estrutura inicial obrigatória da equipe: 1 entrante, 1 vigia e 1 supervisor.
+// Estrutura inicial obrigatória da equipe. v1.2.0: o supervisor aparece primeiro,
+// porque é o responsável pela PET e alimenta a identificação.
 const initialPeople = [
+  { role: 'Supervisor de Entrada', required: true, type: 'supervisor' },
   { role: 'Entrante - 1', required: true, type: 'entrante' },
-  { role: 'Vigia - 1', required: true, type: 'vigia' },
-  { role: 'Supervisor de Entrada', required: true, type: 'supervisor' }
+  { role: 'Vigia - 1', required: true, type: 'vigia' }
 ];
 
 // Lista em memória dos profissionais exibidos na tela de assinatura.
@@ -121,6 +144,13 @@ let people = [];
 let finalizedRecord = null;
 let finalizationInProgress = false;
 let currentFormStep = 1;
+
+// v1.2.0: usuário cujo rascunho está carregado na tela. Evita recarregar (e perder)
+// o formulário quando a sessão é apenas reconfirmada no servidor.
+let workspaceUserId = null;
+
+// Etapas em que o usuário já tentou avançar; só nelas os campos vazios ficam vermelhos.
+const triedSteps = new Set();
 
 // Sessão autenticada no Worker/D1. O token é usado apenas para chamadas da API.
 let authState = null;
@@ -343,7 +373,7 @@ function isQuotaError(error) {
 function showStorageNotice(message, kind = 'warn') {
   const box = $('#storageNotice');
   if (!box) return;
-  box.className = `validation-box ${kind}`;
+  box.className = `alert alert-${kind}`;
   box.textContent = message;
   box.classList.remove('hidden');
 }
@@ -375,31 +405,146 @@ function purgeLegacySharedStorage() {
   ['petDigitalDraftV7','petDigitalRecordsV1'].forEach(key => localStorage.removeItem(key));
 }
 
-/** Limpa estado em memória ao trocar/sair de usuário, sem apagar os dados próprios já separados. */
+/**
+ * Limpa o estado em memória ao trocar/sair de usuário ou iniciar nova PET.
+ * O quê: zera formulário, equipe, tentativa em andamento e telas de conclusão.
+ * Como: não apaga dados salvos de outros usuários; apenas a tela atual.
+ * Quando: logout, troca de usuário, "Descartar" e "Iniciar nova PET".
+ */
 function clearWorkspaceMemory() {
   finalizedRecord = null;
-  const finalize = $('#finalizeBtn');
-  if (finalize) { finalize.disabled = false; finalize.textContent = 'Finalizar PET oficial'; }
   finalizationInProgress = false;
+  triedSteps.clear();
   people = [];
   const form = $('#petForm');
   if (form) form.reset();
   resetPeople();
   renderPeople();
   setDefaultDateTime();
-  const printArea = $('#printArea');
-  if (printArea) { printArea.innerHTML = ''; printArea.classList.add('hidden'); }
-  ['#integrityPanel','#serverPanel'].forEach(sel => $(sel)?.classList.add('hidden'));
-  ['#registerServerBtn','#printBtn','#sharePdfBtn','#exportBtn','#shareJsonBtn'].forEach(sel => { const b=$(sel); if (b) b.disabled=true; });
+  if (typeof refreshFormDerivedUi === 'function') refreshFormDerivedUi();
+  ['#serverPanel', '#pendingAttemptBox', '#storageNotice'].forEach(sel => $(sel)?.classList.add('hidden'));
   const records = $('#recordsList'); if (records) records.innerHTML = '';
+  if (typeof showFormView === 'function') showFormView('form');
   showFormStep(1);
 }
 
-/** Carrega somente o rascunho e os registros pertencentes ao usuário autenticado. */
-function loadUserWorkspace() {
+/**
+ * Carrega o rascunho, a tentativa pendente e os registros do usuário autenticado.
+ * O quê: só recarrega quando o usuário da tela muda (v1.2.0).
+ * Como: compara `workspaceUserId` com o usuário da sessão; `force` recarrega mesmo assim.
+ * Quando: login, abertura do app com sessão salva e troca de conta.
+ * Por quê: antes, abrir a aba Sistema recarregava o formulário e esquecia a tentativa pendente,
+ * o que permitia emitir a mesma PET duas vezes com números diferentes.
+ */
+async function loadUserWorkspace({ force = false } = {}) {
+  const user = currentUser();
+  if (!user?.id) return;
+  if (!force && workspaceUserId === user.id) return;
+  workspaceUserId = user.id;
   clearWorkspaceMemory();
   loadDraft();
+  await restorePendingAttempt();
   renderRecords();
+}
+
+/* ---------- Tentativa de emissão pendente (v1.2.0) ---------- */
+
+function currentPendingKey() { return scopedStorageKey(STORAGE_PENDING); }
+
+/** Lê o ponteiro da tentativa gerada e ainda não registrada. */
+function readPendingPointer() {
+  const key = currentPendingKey();
+  if (!key) return null;
+  try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; }
+}
+
+/** Grava o ponteiro: código do registro + "impressão digital" do formulário naquele momento. */
+function writePendingPointer(recordId, formFingerprint) {
+  const key = currentPendingKey();
+  if (!key) return;
+  safeLocalStorageSet(key, JSON.stringify({ recordId, formFingerprint, savedAt: new Date().toISOString() }), 'a tentativa pendente');
+}
+
+function clearPendingPointer() {
+  const key = currentPendingKey();
+  if (key) localStorage.removeItem(key);
+}
+
+/**
+ * Recupera a tentativa pendente depois de recarregar o app ou fazer login de novo.
+ * O quê: devolve ao `finalizedRecord` a PET já gerada (mesmo número, mesmos arquivos).
+ * Como: busca o resumo no histórico local e o snapshot completo no IndexedDB.
+ * Quando: dentro de `loadUserWorkspace()`.
+ */
+async function restorePendingAttempt() {
+  const pointer = readPendingPointer();
+  if (!pointer?.recordId) return null;
+  const compact = getRecords().find(r => r.recordId === pointer.recordId);
+  if (!compact || compact.serverRegistration || compact.discardedAt) { clearPendingPointer(); return null; }
+  const record = await hydrateRecord(compact);
+  if (!record) { clearPendingPointer(); return null; }
+  finalizedRecord = normalizeFinalizationRecordStructure(record);
+  finalizedRecord.pendingFormFingerprint = pointer.formFingerprint || '';
+  if (typeof renderPendingAttempt === 'function') renderPendingAttempt();
+  return finalizedRecord;
+}
+
+/* ---------- Avisos na tela (v1.2.0: substituem alert/confirm do navegador) ---------- */
+
+let toastTimer = null;
+
+/**
+ * Mostra um aviso curto no rodapé da tela.
+ * O quê: substitui `alert()`, que interrompia o preenchimento com uma janela do navegador.
+ * Como: escreve no elemento #toast e some sozinho; erros ficam mais tempo na tela.
+ * Quando: confirmações de ações, erros de rede, orientações rápidas.
+ */
+function notify(message, kind = 'info', ms) {
+  const box = $('#toast');
+  if (!box) { console.info(message); return; }
+  box.textContent = String(message || '');
+  box.className = 'toast' + (kind === 'bad' ? ' toast-bad' : kind === 'ok' ? ' toast-ok' : '');
+  clearTimeout(toastTimer);
+  const duration = ms || (kind === 'bad' ? 7000 : 3500);
+  toastTimer = setTimeout(() => box.classList.add('hidden'), duration);
+}
+
+/**
+ * Pede confirmação ao usuário em uma janela do próprio aplicativo.
+ * Retorna uma Promise<boolean>. Substitui `confirm()`.
+ */
+function askConfirm(message, { okLabel = 'Confirmar', cancelLabel = 'Cancelar', danger = false } = {}) {
+  const dialog = $('#confirmDialog');
+  if (!dialog?.showModal) return Promise.resolve(window.confirm(message));
+  $('#confirmMessage').textContent = message;
+  const ok = $('#confirmOk');
+  const cancel = $('#confirmCancel');
+  ok.textContent = okLabel;
+  cancel.textContent = cancelLabel;
+  ok.className = 'btn ' + (danger ? 'danger' : 'primary');
+  return new Promise(resolve => {
+    const finish = value => {
+      ok.onclick = cancel.onclick = null;
+      dialog.removeEventListener('cancel', onCancel);
+      dialog.close();
+      resolve(value);
+    };
+    const onCancel = event => { event.preventDefault(); finish(false); };
+    ok.onclick = () => finish(true);
+    cancel.onclick = () => finish(false);
+    dialog.addEventListener('cancel', onCancel);
+    dialog.showModal();
+    setTimeout(() => cancel.focus(), 30);
+  });
+}
+
+/** Mostra/oculta a tela de processamento da emissão. */
+function setBusy(active, title, text) {
+  const overlay = $('#busyOverlay');
+  if (!overlay) return;
+  if (title) $('#busyTitle').textContent = title;
+  if (text) $('#busyText').textContent = text;
+  overlay.classList.toggle('hidden', !active);
 }
 
 /**

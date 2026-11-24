@@ -1,17 +1,18 @@
 /**
- * Service Worker do PET-Digital NR-33 v1.1.6 (hotfix 2).
+ * Service Worker do PET-Digital NR-33 v1.2.0.
  *
  * O quê: mantém offline somente os arquivos estáticos do próprio aplicativo.
  * Como: usa uma lista fechada; nunca intercepta API, Authorization, CDN, sessão ou IP.
  * Quando: instalado/atualizado ao acessar o Cloudflare Pages.
  *
+ * v1.2.0: novo nome de cache, para que os celulares baixem a nova interface.
  * v1.1.6:
  * - apaga imediatamente caches anteriores;
  * - atualiza a lista para os quatro módulos JavaScript;
  * - não armazena bibliotecas externas nem respostas autenticadas.
  */
 
-const CACHE_NAME = 'pet-digital-static-v1.1.6-hotfix2';
+const CACHE_NAME = 'pet-digital-static-v1.2.0';
 const APP_SHELL = [
   './',
   './index.html',

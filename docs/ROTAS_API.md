@@ -1,17 +1,20 @@
-# Rotas da API v1.1.6
+# Rotas da API v1.2.0
+
+> CORS: aceita a origem de `CORS_ALLOWED_ORIGIN` (uma ou mais, separadas por vírgula) e, salvo `CORS_ALLOW_PREVIEWS = "false"`, as publicações de teste do mesmo projeto Pages (`https://<id>.pet-digital.pages.dev`).
 
 ## Públicas
 
 - `GET /`
-- `GET /health`
-- `GET /db-test`
+- `GET /health` — informa também `version`.
 - `POST /setup/admin` — somente instalação inicial com token de bootstrap.
-- `POST /auth/login`
+- `POST /auth/login` — devolve `token`, `user` e `expiresAt` (o app guarda a sessão até essa data).
 
 ## Sessão autenticada
 
+- `GET /db-test` — **somente administrador** (v1.2.0); lista as tabelas do D1.
+
 - `POST /auth/logout`
-- `GET /auth/me`
+- `GET /auth/me` — devolve o usuário e `session.expires_at`; 401 quando a sessão venceu ou foi revogada (o app volta ao login sem apagar o rascunho).
 - `GET /client-context`
 - `POST /auth/change-password`
 

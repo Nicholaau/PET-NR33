@@ -1,9 +1,18 @@
 'use strict';
 /**
- * PET-Digital v1.1.6 — formulário e emissão.
- * O quê: fotos, assinaturas, checklist, medições, etapas, validação e finalização.
+ * PET-Digital v1.2.0 — formulário e emissão.
+ * O quê: fotos, assinaturas, checklist, medições, etapas, revisão, validação e finalização.
  * Como: coleta o formulário, aplica regras locais e prepara o dossiê assinado.
  * Quando: preenchimento e finalização da PET.
+ *
+ * Mudanças da v1.2.0 (interface aprovada no protótipo):
+ * - barra fixa Voltar/Próxima no rodapé; campos ficam vermelhos só depois de tentar avançar;
+ * - checklist agrupado por assunto, com contador e rolagem automática para o próximo item;
+ * - medições com indicação de limite ao lado de cada campo e teste após ventilação automático;
+ * - equipe em lista compacta, editor por pessoa, câmera traseira e assinatura em tela cheia;
+ * - etapa 6 virou revisão completa antes de finalizar;
+ * - a tentativa gerada e não registrada é reaproveitada (sem PET duplicada);
+ * - restaurada a função focusIssue (antes `focusFirstFormIssue`, ausente na v1.1.6).
  */
 
 /**
@@ -75,28 +84,6 @@ function getSignatureCanvasMetrics(canvas) {
   const boundsHeight = maxY >= minY ? maxY - minY + 1 : 0;
   const isSigned = inkPixels >= SIGNATURE_MIN_INK_PIXELS && (boundsWidth >= SIGNATURE_MIN_BOUNDS || boundsHeight >= SIGNATURE_MIN_BOUNDS);
   return { isSigned, inkPixels, boundsWidth, boundsHeight };
-}
-
-/**
- * Limpa os dados de assinatura de um profissional e atualiza a interface do cartão.
- * Ativação: assinatura vazia, botão 'Limpar assinatura' e correção de assinaturas inválidas.
- * O que faz: remove imagem, hash, data/hora e métricas da assinatura para impedir que
- * assinatura vazia ou incompleta avance para o dossiê.
- */
-function clearPersonSignature(person, card) {
-  Object.assign(person, {
-    signatureDataUrl: '',
-    signedAt: '',
-    signatureHash: '',
-    signatureMetrics: null,
-    _dirtySignature: false
-  });
-  if (card) {
-    const canvas = $('.signature-pad', card);
-    if (canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
-    const status = $('.sig-status', card);
-    if (status) status.textContent = 'Pendente de assinatura';
-  }
 }
 
 /**
@@ -292,89 +279,158 @@ async function hasCompletePendingArtifacts(record) {
   }
 }
 
+/* =====================================================================
+ * CHECKLIST
+ * ===================================================================== */
+
 /**
- * Renderiza o checklist e um campo de justificativa para cada resposta N/A.
- * O campo fica oculto até N/A ser escolhido. A alternativa selecionada (Sim, Não ou N/A)
- * não bloqueia a emissão; o sistema exige apenas que todos os itens sejam respondidos e
- * que N/A tenha uma justificativa objetiva, sem tamanho mínimo.
+ * Renderiza o checklist agrupado por assunto.
+ * O quê: um cartão por item, com Sim/Não/N/A e campo de justificativa que aparece só no N/A.
+ * Como: um único conjunto de rádios por item (`check_NN`), usado por rascunho, validação e payload.
+ * Quando: uma vez, na inicialização.
  */
 function renderChecklist() {
-  const container = $('#checklistCards');
-  const tbody = $('#checklistTable tbody');
-  const htmlRows = checklistItems.map((item, index) => {
-    const n = String(index + 1).padStart(2, '0');
-    return `<tr data-check-row="${n}">
-      <td>${n}</td>
-      <td>${escapeHtml(item)}</td>
-      <td><input required type="radio" name="check_${n}" value="S" aria-label="Item ${n}: Sim" /></td>
-      <td><input required type="radio" name="check_${n}" value="N" aria-label="Item ${n}: Não" /></td>
-      <td><input required type="radio" name="check_${n}" value="NA" aria-label="Item ${n}: Não se aplica" /></td>
-    </tr>
-    <tr class="na-justification-row hidden" data-na-row="${n}">
-      <td></td><td colspan="4"><label>Justificativa do N/A — item ${n}
-        <input name="check_${n}_justification" maxlength="300" placeholder="Explique objetivamente por que o item não se aplica" />
-      </label></td>
-    </tr>`;
-  }).join('');
-  if (tbody) tbody.innerHTML = htmlRows;
-
-  // Em telas pequenas, cartões são mais legíveis que uma tabela de 5 colunas.
-  // Os mesmos inputs continuam sendo usados, portanto rascunho, validação e payload não mudam.
-  if (container) {
-    container.innerHTML = checklistItems.map((item, index) => {
-      const n = String(index + 1).padStart(2, '0');
-      return `<fieldset class="check-card" data-check-card="${n}">
-        <legend><span class="check-number">${n}</span> ${escapeHtml(item)}</legend>
-        <div class="check-options" role="radiogroup" aria-label="Resposta do item ${n}">
-          <label><input required type="radio" name="check_mobile_${n}" value="S" data-check-mobile="${n}" /> <span>Sim</span></label>
-          <label><input required type="radio" name="check_mobile_${n}" value="N" data-check-mobile="${n}" /> <span>Não</span></label>
-          <label><input required type="radio" name="check_mobile_${n}" value="NA" data-check-mobile="${n}" /> <span>N/A</span></label>
-        </div>
-        <label class="na-justification-mobile hidden" data-na-card="${n}">Justificativa do N/A
-          <input data-check-mobile-justification="${n}" maxlength="300" placeholder="Explique por que o item não se aplica" />
-        </label>
-      </fieldset>`;
-    }).join('');
-  }
+  const container = $('#checklistGroups');
+  if (!container) return;
+  container.innerHTML = CHECKLIST_GROUPS.map(group => `
+    <div class="check-group" data-check-group>
+      <div class="check-group-head"><h3>${escapeHtml(group.title)}</h3><span data-group-count></span></div>
+      ${group.items.map(n => {
+        const text = checklistItems[Number(n) - 1];
+        return `<fieldset class="check-card" id="ck-${n}" data-check-card="${n}">
+          <legend><span class="check-number">${n}</span><span>${escapeHtml(text)}</span></legend>
+          <div class="answers">
+            <label class="answer-btn"><input type="radio" name="check_${n}" value="S" aria-label="Item ${n}: Sim" /><span>Sim</span></label>
+            <label class="answer-btn"><input type="radio" name="check_${n}" value="N" aria-label="Item ${n}: Não" /><span>Não</span></label>
+            <label class="answer-btn"><input type="radio" name="check_${n}" value="NA" aria-label="Item ${n}: Não se aplica" /><span>N/A</span></label>
+          </div>
+          <label class="field na-just hidden" id="ckj-${n}">Por que não se aplica?
+            <input name="check_${n}_justification" maxlength="300" placeholder="Justificativa curta" />
+          </label>
+        </fieldset>`;
+      }).join('')}
+    </div>`).join('');
 }
 
-
-/** Mostra/oculta a justificativa do N/A conforme a resposta selecionada. */
+/** Mostra/oculta a justificativa do N/A conforme a resposta marcada. */
 function updateNaJustificationVisibility(number) {
   const selected = $(`input[name="check_${number}"]:checked`);
-  const row = $(`[data-na-row="${number}"]`);
+  const box = $(`#ckj-${number}`);
   const input = $(`[name="check_${number}_justification"]`);
-  const mobileRow = $(`[data-na-card="${number}"]`);
-  const mobileInput = $(`[data-check-mobile-justification="${number}"]`);
   const active = selected?.value === 'NA';
-  row?.classList.toggle('hidden', !active);
-  mobileRow?.classList.toggle('hidden', !active);
-  if (input) {
-    input.required = active;
-    if (!active) input.value = '';
-  }
-  if (mobileInput) {
-    mobileInput.required = active;
-    mobileInput.value = input?.value || '';
-  }
-  // Mantém o cartão móvel espelhado quando o valor foi restaurado de rascunho/desktop.
-  if (selected) {
-    const mobile = $(`[data-check-mobile="${number}"][value="${selected.value}"]`);
-    if (mobile) mobile.checked = true;
-  }
+  box?.classList.toggle('hidden', !active);
+  if (input && !active) input.value = '';
 }
 
+/** Atualiza contador geral, contadores por grupo e justificativas visíveis. */
+function updateChecklistUi() {
+  let answered = 0;
+  CHECKLIST_DISPLAY_ORDER.forEach(n => {
+    if ($(`input[name="check_${n}"]:checked`)) answered++;
+    updateNaJustificationVisibility(n);
+  });
+  const text = $('#checklistProgressText');
+  if (text) text.textContent = `${answered} de ${checklistItems.length} respondidos`;
+  const bar = $('#checklistProgressBar');
+  if (bar) bar.style.width = `${Math.round(answered / checklistItems.length * 100)}%`;
+  $$('[data-check-group]').forEach((groupEl, idx) => {
+    const items = CHECKLIST_GROUPS[idx].items;
+    const done = items.filter(n => $(`input[name="check_${n}"]:checked`)).length;
+    const counter = $('[data-group-count]', groupEl);
+    if (counter) counter.textContent = `${done} / ${items.length}`;
+  });
+}
+
+/** Depois de responder um item, leva a tela ao próximo item sem resposta. */
+function scrollToNextChecklistItem(number, answer) {
+  if (answer === 'NA') {
+    setTimeout(() => $(`[name="check_${number}_justification"]`)?.focus({ preventScroll: false }), 60);
+    return;
+  }
+  const order = CHECKLIST_DISPLAY_ORDER;
+  const next = order.slice(order.indexOf(number) + 1).find(n => !$(`input[name="check_${n}"]:checked`));
+  if (next) setTimeout(() => $(`#ck-${next}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 80);
+}
+
+/* =====================================================================
+ * MEDIÇÕES
+ * ===================================================================== */
+
+/** Converte o texto digitado (aceita vírgula) em número; vazio vira null e texto inválido vira NaN. */
+function parseGasValue(raw) {
+  const text = String(raw ?? '').trim();
+  if (!text) return null;
+  const n = Number(text.replace(',', '.'));
+  return Number.isFinite(n) ? n : NaN;
+}
+
+/** Avalia um teste (inicial ou após ventilação) a partir dos campos do formulário. */
+function evaluateGasTest(prefix) {
+  const form = $('#petForm');
+  const hora = form.elements[`${prefix}_hora`]?.value || '';
+  const result = { hora, values: {}, complete: !!hora, out: false, invalid: false, any: !!hora || !!normalizeText(form.elements[`${prefix}_obs`]?.value) };
+  GAS_LIMITS.forEach(limit => {
+    const value = parseGasValue(form.elements[`${prefix}_${limit.key}`]?.value);
+    result.values[limit.key] = value;
+    if (value === null) { result.complete = false; return; }
+    result.any = true;
+    if (Number.isNaN(value) || value < 0) { result.invalid = true; result.complete = false; return; }
+    if (!limit.ok(value)) result.out = true;
+  });
+  result.safe = result.complete && !result.out;
+  return result;
+}
+
+let ventilationAdded = false;
+
 /**
- * Cria o objeto interno de um profissional.
- * Ativação: inicialização da equipe e botões 'Adicionar entrante/vigia'.
- * O que faz: gera ID único, define papel/tipo, marca se é obrigatório e inicializa
- * campos de nome, matrícula, foto, assinatura e respectivos hashes.
+ * Atualiza a indicação de limite de cada campo e a exibição do teste após ventilação.
+ * O teste após ventilação aparece sozinho quando algum valor inicial sai do limite.
  */
+function updateGasUi() {
+  const form = $('#petForm');
+  if (!form) return;
+  ['gas_inicial', 'gas_ventilacao'].forEach(prefix => {
+    GAS_LIMITS.forEach(limit => {
+      const name = `${prefix}_${limit.key}`;
+      const chip = $(`[data-gas-status="${name}"]`);
+      if (!chip) return;
+      const value = parseGasValue(form.elements[name]?.value);
+      if (value === null) { chip.classList.add('hidden'); return; }
+      chip.classList.remove('hidden');
+      if (Number.isNaN(value) || value < 0) { chip.className = 'status-chip status-bad'; chip.textContent = 'Valor inválido'; }
+      else if (limit.ok(value)) { chip.className = 'status-chip status-ok'; chip.textContent = 'Dentro do limite'; }
+      else { chip.className = 'status-chip status-bad'; chip.textContent = 'Fora do limite'; }
+    });
+  });
+  const initial = evaluateGasTest('gas_inicial');
+  const vent = evaluateGasTest('gas_ventilacao');
+  const needVent = initial.out;
+  const showVent = needVent || ventilationAdded || vent.any;
+  $('#ventNeededNotice')?.classList.toggle('hidden', !needVent);
+  $('#ventCard')?.classList.toggle('hidden', !showVent);
+  $('#addVentBtn')?.classList.toggle('hidden', showVent);
+  $('#removeVentBtn')?.classList.toggle('hidden', needVent || !showVent);
+}
+
+/** Remove o teste após ventilação opcional (só quando o inicial está dentro do limite). */
+function removeVentilationTest() {
+  const form = $('#petForm');
+  ['hora', 'o2', 'lie', 'h2s', 'co', 'obs'].forEach(k => { const el = form.elements[`gas_ventilacao_${k}`]; if (el) el.value = ''; });
+  ventilationAdded = false;
+  updateGasUi();
+  autoSaveDraft();
+}
+
+/* =====================================================================
+ * EQUIPE
+ * ===================================================================== */
+
 function createPerson(type, required = false) {
   const baseRole = type === 'supervisor' ? 'Supervisor de Entrada' : type === 'vigia' ? 'Vigia' : 'Entrante';
   return {
     id: crypto.randomUUID ? crypto.randomUUID() : 'p-' + Date.now() + '-' + Math.random().toString(16).slice(2),
-    role: required && type === 'supervisor' ? baseRole : `${baseRole} - 1`,
+    role: type === 'supervisor' ? baseRole : `${baseRole} - 1`,
     type,
     required,
     nome: '',
@@ -389,23 +445,16 @@ function createPerson(type, required = false) {
   };
 }
 
-/**
- * Reinicia a lista de profissionais para o mínimo obrigatório.
- * Ativação: abertura inicial e botão 'Limpar formulário'.
- * O que faz: cria 1 entrante, 1 vigia e 1 supervisor, depois reindexa os rótulos.
- */
+/** Reinicia a equipe com o mínimo obrigatório: supervisor, 1 entrante e 1 vigia. */
 function resetPeople() {
   people = initialPeople.map(p => createPerson(p.type, p.required));
   reindexPeople();
 }
 
-/**
- * Recalcula a numeração visual de entrantes e vigias.
- * Ativação: após adicionar, remover, restaurar rascunho ou reiniciar pessoas.
- * O que faz: renumera Entrante - 1, Entrante - 2, Vigia - 1 etc., mantendo o supervisor
- * com o nome fixo 'Supervisor de Entrada'.
- */
+/** Ordena (supervisor, entrantes, vigias) e renumera os rótulos. */
 function reindexPeople() {
+  const rank = { supervisor: 0, entrante: 1, vigia: 2 };
+  people.sort((a, b) => (rank[a.type] ?? 9) - (rank[b.type] ?? 9));
   let entrante = 0;
   let vigia = 0;
   people.forEach(p => {
@@ -415,519 +464,349 @@ function reindexPeople() {
   });
 }
 
-/**
- * Adiciona novo entrante ou vigia à PET.
- * Ativação: botões 'Adicionar entrante' e 'Adicionar vigia'.
- * O que faz: sincroniza inputs atuais, cria o profissional, insere na posição correta
- * da lista, reindexa, redesenha a tela e salva rascunho automaticamente.
- */
-function addProfessional(type) {
-  syncPeopleFromInputs();
-  const counts = people.reduce((acc, p) => { acc[p.type] = (acc[p.type] || 0) + 1; return acc; }, {});
-  if (people.length >= MAX_PARTICIPANTS) return alert(`Limite total de ${MAX_PARTICIPANTS} participantes atingido.`);
-  if (type === 'entrante' && (counts.entrante || 0) >= MAX_ENTRANTES) return alert(`Limite de ${MAX_ENTRANTES} entrantes atingido.`);
-  if (type === 'vigia' && (counts.vigia || 0) >= MAX_VIGIAS) return alert(`Limite de ${MAX_VIGIAS} vigias atingido.`);
-  const person = createPerson(type, false);
-  if (type === 'entrante') {
-    const firstNonEntrante = people.findIndex(p => p.type !== 'entrante');
-    people.splice(firstNonEntrante === -1 ? people.length : firstNonEntrante, 0, person);
-  } else if (type === 'vigia') {
-    const supervisorIndex = people.findIndex(p => p.type === 'supervisor');
-    people.splice(supervisorIndex === -1 ? people.length : supervisorIndex, 0, person);
-  }
-  reindexPeople();
-  renderPeople();
-  markFinalizedRecordStale();
-  autoSaveDraft();
+/** Rótulo amigável para a tela ("Entrante 1" em vez de "Entrante - 1"). */
+function personLabel(person) { return String(person?.role || '').replace(' - ', ' '); }
+
+function initialsOf(name) {
+  const parts = normalizeText(name).split(/\s+/).filter(Boolean);
+  if (!parts.length) return '?';
+  return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
 }
 
-/**
- * Renderiza os cartões de profissionais, fotos e assinaturas.
- * Ativação: inicialização, restauração de rascunho, adição/remoção de pessoas.
- * O que faz: monta o HTML de cada pessoa, exibe foto/status, cria canvas de assinatura
- * e recarrega a assinatura já salva quando existir.
- */
-/**
- * Atualiza a identificação visual do supervisor usando o cartão da equipe.
- * O quê: elimina a digitação duplicada do nome do supervisor.
- * Como: lê a pessoa `type=supervisor` e apresenta nome/matrícula na etapa Identificação.
- * Quando: renderização da equipe e qualquer alteração de nome/matrícula do supervisor.
- */
+function personIsComplete(p) {
+  return Boolean(normalizeText(p.nome) && normalizeText(p.matricula) && p.photoDataUrl && p.signatureDataUrl);
+}
+
+/** Adiciona entrante ou vigia e abre direto o editor da pessoa nova. */
+function addProfessional(type) {
+  const counts = people.reduce((acc, p) => { acc[p.type] = (acc[p.type] || 0) + 1; return acc; }, {});
+  if (people.length >= MAX_PARTICIPANTS) return notify(`Limite total de ${MAX_PARTICIPANTS} participantes atingido.`, 'bad');
+  if (type === 'entrante' && (counts.entrante || 0) >= MAX_ENTRANTES) return notify(`Limite de ${MAX_ENTRANTES} entrantes atingido.`, 'bad');
+  if (type === 'vigia' && (counts.vigia || 0) >= MAX_VIGIAS) return notify(`Limite de ${MAX_VIGIAS} vigias atingido.`, 'bad');
+  const person = createPerson(type, false);
+  people.push(person);
+  reindexPeople();
+  renderPeople();
+  autoSaveDraft();
+  openPerson(person.id);
+}
+
+/** Mostra o supervisor (vindo da etapa Equipe) na etapa Identificação. */
 function updateSupervisorAutoDisplay() {
   const supervisor = people.find(person => person.type === 'supervisor');
   const label = $('#supervisorAutoLabel');
   if (!label) return;
   const nome = normalizeText(supervisor?.nome);
   const matricula = normalizeText(supervisor?.matricula);
-  label.textContent = nome ? `${nome}${matricula ? ` — matrícula ${matricula}` : ''}` : 'Será preenchido automaticamente com o supervisor informado na etapa “Equipe”.';
+  label.textContent = nome ? `${nome}${matricula ? ` — matrícula ${matricula}` : ''}` : 'Preenchido a partir da etapa Equipe';
 }
 
+/** Lista compacta da equipe: uma linha por pessoa, com situação da foto e da assinatura. */
 function renderPeople() {
   const list = $('#peopleList');
-  list.innerHTML = '';
-  people.forEach(person => {
-    const div = document.createElement('div');
-    div.className = 'person-card';
-    div.tabIndex = -1;
-    div.dataset.personId = person.id;
-    div.innerHTML = `
-      <div class="person-head">
-        <span class="person-role">${escapeHtml(person.role)} <span title="Obrigatório">*</span></span>
-        ${!person.required && ['entrante', 'vigia'].includes(person.type) ? '<button type="button" class="small danger ghost remove-person">Remover</button>' : ''}
-      </div>
-      <div class="grid cols-2">
-        <label>Nome completo
-          <input data-field="nome" required value="${escapeAttr(person.nome)}" />
-        </label>
-        <label>Matrícula
-          <input data-field="matricula" required value="${escapeAttr(person.matricula)}" />
-        </label>
-      </div>
-      <div class="auth-grid">
-        <div class="photo-box">
-          <strong>Foto do servidor</strong>
-          <p class="photo-note">A foto deve mostrar o rosto do servidor com o crachá funcional visível.</p>
-          <div class="photo-preview">${person.photoDataUrl ? `<img src="${person.photoDataUrl}" alt="Foto de ${escapeAttr(person.nome || person.role)}" />` : '<span>Sem foto</span>'}</div>
-          <label class="photo-input-label no-print">Capturar/selecionar foto
-            <input class="person-photo-input" type="file" accept="image/*" capture="user" />
-          </label>
-          <div class="signature-actions no-print">
-            <button type="button" class="small ghost clear-photo">Limpar foto</button>
-            <span class="photo-status">${person.photoCapturedAt ? 'Capturada em ' + formatDateTime(person.photoCapturedAt) : 'Pendente de foto'}</span>
-          </div>
-        </div>
-        <div class="signature-box">
-          <strong>Assinatura</strong>
-          <canvas class="signature-pad" width="900" height="220"></canvas>
-          <div class="signature-actions no-print">
-            <button type="button" class="small secondary save-signature">Registrar assinatura</button>
-            <button type="button" class="small ghost clear-signature">Limpar assinatura</button>
-            <span class="sig-status">${person.signatureDataUrl ? 'Assinada em ' + formatDateTime(person.signedAt) : 'Pendente de assinatura'}</span>
-          </div>
-        </div>
-      </div>`;
-    list.appendChild(div);
-    const canvas = $('.signature-pad', div);
-    setupCanvas(canvas, person);
-    if (person.signatureDataUrl) {
-      const img = new Image();
-      img.onload = () => {
-        const ctx = canvas.getContext('2d');
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      };
-      img.src = person.signatureDataUrl;
-    }
-  });
+  if (!list) return;
+  const flagged = triedSteps.has(4);
+  list.innerHTML = people.map(p => {
+    const missing = flagged && !personIsComplete(p);
+    const photoChip = p.photoDataUrl ? ['status-ok', 'Foto ok'] : [missing ? 'status-bad' : 'status-neutral', 'Sem foto'];
+    const sigChip = p.signatureDataUrl ? ['status-ok', 'Assinado'] : [missing ? 'status-bad' : 'status-neutral', 'Sem assinatura'];
+    const nome = normalizeText(p.nome);
+    return `<button type="button" class="person-row${missing ? ' is-missing' : ''}" id="pp-${escapeAttr(p.id)}" data-person-open="${escapeAttr(p.id)}">
+      <span class="avatar">${p.photoDataUrl ? `<img src="${p.photoDataUrl}" alt="" />` : escapeHtml(initialsOf(nome))}</span>
+      <span class="person-main">
+        <span class="person-role">${escapeHtml(personLabel(p))}</span>
+        <span class="person-name${nome ? '' : ' empty'}">${escapeHtml(nome || 'Nome não informado')}</span>
+        <span class="person-chips"><span class="status-chip ${photoChip[0]}">${photoChip[1]}</span><span class="status-chip ${sigChip[0]}">${sigChip[1]}</span></span>
+      </span>
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+    </button>`;
+  }).join('');
   updateSupervisorAutoDisplay();
 }
 
+let openPersonId = null;
+
+/** Abre o editor de uma pessoa da equipe. */
+function openPerson(id) {
+  const person = people.find(p => p.id === id);
+  if (!person) return;
+  openPersonId = id;
+  renderPersonView();
+  showFormView('person');
+  window.scrollTo({ top: 0 });
+}
+
+/** Preenche o editor com os dados da pessoa aberta. */
+function renderPersonView() {
+  const person = people.find(p => p.id === openPersonId);
+  if (!person) return;
+  $('#personRoleTitle').textContent = personLabel(person);
+  $('#personNome').value = person.nome || '';
+  $('#personMatricula').value = person.matricula || '';
+  const preview = $('#personPhotoPreview');
+  preview.classList.toggle('has-image', !!person.photoDataUrl);
+  preview.innerHTML = person.photoDataUrl
+    ? `<img src="${person.photoDataUrl}" alt="Foto de ${escapeAttr(person.nome || personLabel(person))}" />`
+    : '<span>Rosto e crachá funcional devem aparecer na foto</span>';
+  $('#personPhotoLabel').textContent = person.photoDataUrl ? 'Tirar outra foto' : 'Tirar foto';
+  $('#personPhotoInfo').textContent = person.photoCapturedAt ? `Foto registrada em ${formatDateTime(person.photoCapturedAt)}.` : 'Abre a câmera traseira, para fotografar o colega.';
+  const sig = $('#personSigPreview');
+  sig.innerHTML = person.signatureDataUrl ? `<img src="${person.signatureDataUrl}" alt="Assinatura registrada" />` : '<span>Assinatura pendente</span>';
+  $('#personSignBtn').textContent = person.signatureDataUrl ? 'Assinar novamente' : 'Assinar em tela cheia';
+  $('#personSigInfo').textContent = person.signedAt ? `Assinada em ${formatDateTime(person.signedAt)}.` : '';
+  const sameType = people.filter(p => p.type === person.type).length;
+  const removable = person.type !== 'supervisor' && sameType > 1;
+  const removeBtn = $('#personRemoveBtn');
+  removeBtn.classList.toggle('hidden', !removable);
+  removeBtn.textContent = `Remover ${personLabel(person)}`;
+}
+
+/** Fecha o editor e volta para a lista, posicionando na pessoa editada. */
+function closePerson() {
+  const id = openPersonId;
+  openPersonId = null;
+  renderPeople();
+  showFormView('form');
+  if (triedSteps.has(4)) refreshStepIssues();
+  if (id) setTimeout(() => $(`#pp-${CSS.escape(id)}`)?.scrollIntoView({ block: 'center' }), 30);
+}
+
+/* ---------- Assinatura em tela cheia ---------- */
+
+let signatureTarget = null;
+let signatureDrawn = false;
+
 /**
- * Configura o canvas usado para assinatura manuscrita.
- * Ativação: chamada por `renderPeople` para cada cartão de profissional.
- * O que faz: define estilo do traço e registra eventos de mouse/toque para desenhar
- * a assinatura; marca a assinatura como alterada quando houver novo traço.
+ * Abre a área de assinatura em tela cheia.
+ * Como: ajusta o tamanho interno do canvas ao tamanho real na tela (evita traço distorcido)
+ * e limpa qualquer traço anterior. A assinatura só é gravada em "Confirmar assinatura".
  */
-function setupCanvas(canvas, person) {
+function openSignature(personId) {
+  const person = people.find(p => p.id === personId);
+  if (!person) return;
+  signatureTarget = personId;
+  signatureDrawn = false;
+  $('#signatureWho').textContent = `${personLabel(person)}${person.nome ? ' — ' + person.nome : ''}`;
+  $('#toast')?.classList.add('hidden');
+  $('#signatureOverlay').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  requestAnimationFrame(resizeSignaturePad);
+}
+
+function resizeSignaturePad() {
+  const canvas = $('#signaturePad');
+  if (!canvas || $('#signatureOverlay').classList.contains('hidden')) return;
+  const rect = canvas.getBoundingClientRect();
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.max(300, Math.round(rect.width * ratio));
+  canvas.height = Math.max(150, Math.round(rect.height * ratio));
   const ctx = canvas.getContext('2d');
-  ctx.lineWidth = 3;
+  ctx.lineWidth = 3 * ratio;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   ctx.strokeStyle = '#111';
-  let drawing = false;
-  let drawn = false;
+  signatureDrawn = false;
+}
 
-  // Calcula a posição do mouse/toque dentro do canvas, corrigindo escala visual x escala real.
-  function pos(event) {
+function closeSignature() {
+  signatureTarget = null;
+  $('#signatureOverlay').classList.add('hidden');
+  document.body.style.overflow = '';
+}
+
+/** Liga os eventos de desenho (ponteiro: dedo, caneta ou mouse) uma única vez. */
+function setupSignaturePad() {
+  const canvas = $('#signaturePad');
+  if (!canvas) return;
+  let drawing = false;
+  const pos = event => {
     const rect = canvas.getBoundingClientRect();
-    const source = event.touches ? event.touches[0] : event;
-    return {
-      x: (source.clientX - rect.left) * (canvas.width / rect.width),
-      y: (source.clientY - rect.top) * (canvas.height / rect.height)
-    };
-  }
-  // Inicia um novo traço da assinatura quando o usuário toca/clica no canvas.
-  function start(event) {
+    return { x: (event.clientX - rect.left) * (canvas.width / rect.width), y: (event.clientY - rect.top) * (canvas.height / rect.height) };
+  };
+  canvas.addEventListener('pointerdown', event => {
     event.preventDefault();
     drawing = true;
+    try { canvas.setPointerCapture(event.pointerId); } catch {}
     const p = pos(event);
+    const ctx = canvas.getContext('2d');
     ctx.beginPath();
     ctx.moveTo(p.x, p.y);
-  }
-  // Continua o traço enquanto o usuário arrasta o dedo/mouse.
-  function move(event) {
+  });
+  canvas.addEventListener('pointermove', event => {
     if (!drawing) return;
     event.preventDefault();
     const p = pos(event);
+    const ctx = canvas.getContext('2d');
     ctx.lineTo(p.x, p.y);
     ctx.stroke();
-    drawn = true;
-  }
-  // Encerra o traço e marca a assinatura como alterada para exigir novo registro.
-  function end(event) {
-    if (!drawing) return;
-    event.preventDefault();
-    drawing = false;
-    if (drawn) person._dirtySignature = true;
-  }
-  canvas.addEventListener('mousedown', start);
-  canvas.addEventListener('mousemove', move);
-  canvas.addEventListener('mouseup', end);
-  canvas.addEventListener('mouseleave', end);
-  canvas.addEventListener('touchstart', start, { passive: false });
-  canvas.addEventListener('touchmove', move, { passive: false });
-  canvas.addEventListener('touchend', end, { passive: false });
+    signatureDrawn = true;
+  });
+  const end = () => { drawing = false; };
+  canvas.addEventListener('pointerup', end);
+  canvas.addEventListener('pointercancel', end);
+  canvas.addEventListener('pointerleave', end);
+  window.addEventListener('resize', () => { if (signatureTarget && !signatureDrawn) resizeSignaturePad(); });
 }
 
-/**
- * Invalida a PET finalizada quando o formulário é alterado depois da assinatura.
- * Ativação: edição de campos, foto, assinatura ou inclusão/remoção de profissionais.
- * O que faz: desabilita PDF/arquivo de validação (JSON) da finalização anterior para evitar que o usuário
- * compartilhe um dossiê antigo após ter modificado dados na tela.
- */
-function markFinalizedRecordStale() {
-  if (!finalizedRecord) return;
-  finalizedRecord = null;
-  const finalizeButton = $('#finalizeBtn');
-  if (finalizeButton) { finalizeButton.disabled = false; finalizeButton.textContent = 'Finalizar PET oficial'; }
-  ['#registerServerBtn', '#printBtn', '#sharePdfBtn', '#exportBtn', '#shareJsonBtn'].forEach(selector => {
-    const btn = $(selector);
-    if (btn) btn.disabled = true;
-  });
-  const panel = $('#integrityPanel');
-  if (panel) panel.classList.add('hidden');
-  const area = $('#printArea');
-  if (area) {
-    area.classList.add('hidden');
-    area.innerHTML = '';
-  }
-  const serverPanel = $('#serverPanel');
-  if (serverPanel) serverPanel.classList.add('hidden');
-  const box = $('#validationBox');
-  if (box) {
-    box.className = 'validation-box warn';
-    box.textContent = 'O formulário foi alterado após a última finalização. Valide e finalize novamente para gerar PDF/arquivo de validação (JSON) atualizados.';
-  }
+function clearSignaturePad() {
+  const canvas = $('#signaturePad');
+  canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+  signatureDrawn = false;
 }
 
-/**
- * Centraliza a amarração de todos os eventos da interface.
- * Ativação: uma vez durante `init()`, depois que o DOM e os componentes dinâmicos existem.
- * O que faz: liga botões, abas, uploads de foto, assinatura, validação, finalização,
- * impressão, exportação, tela de registros, validação de JSON e autosave.
- */
-function bindEvents() {
-  // Navegação superior: cada botão com `data-tab` abre a seção correspondente.
-  $$('[data-tab]').forEach(button => {
-    button.addEventListener('click', () => showTab(button.dataset.tab));
-  });
+/** Confere se há traço suficiente, grava imagem, data/hora e hash da assinatura. */
+async function confirmSignature() {
+  const person = people.find(p => p.id === signatureTarget);
+  if (!person) return closeSignature();
+  const canvas = $('#signaturePad');
+  const metrics = getSignatureCanvasMetrics(canvas);
+  if (!metrics.isSigned) return notify('Desenhe a assinatura antes de confirmar.', 'bad');
+  person.signatureDataUrl = canvas.toDataURL('image/png');
+  person.signedAt = new Date().toISOString();
+  person.signatureHash = await sha256Hex(person.signatureDataUrl);
+  person.signatureMetrics = metrics;
+  closeSignature();
+  renderPersonView();
+  autoSaveDraft();
+  notify('Assinatura registrada.', 'ok', 2000);
+}
 
-  // Alterações de nome/matrícula nos cartões de profissionais atualizam o estado em memória.
-  $('#peopleList').addEventListener('input', event => {
-    const card = event.target.closest('.person-card');
-    if (!card || !event.target.dataset.field) return;
-    const person = people.find(p => p.id === card.dataset.personId);
-    if (person) person[event.target.dataset.field] = event.target.value;
-    updateSupervisorAutoDisplay();
-    markFinalizedRecordStale();
+/** Comprime a foto, registra data/hora e hash e atualiza o editor. */
+async function handlePersonPhoto(file) {
+  const person = people.find(p => p.id === openPersonId);
+  if (!person || !file) return;
+  try {
+    const dataUrl = await fileToCompressedDataUrl(file);
+    person.photoDataUrl = dataUrl;
+    person.photoCapturedAt = new Date().toISOString();
+    person.photoHash = await sha256Hex(dataUrl);
+    renderPersonView();
     autoSaveDraft();
-  });
-
-  // Upload/captura de foto: comprime imagem, registra data/hora, calcula hash e atualiza preview.
-  $('#peopleList').addEventListener('change', async event => {
-    if (!event.target.classList.contains('person-photo-input')) return;
-    const card = event.target.closest('.person-card');
-    const person = people.find(p => p.id === card?.dataset.personId);
-    const file = event.target.files?.[0];
-    if (!person || !file) return;
-    try {
-      const dataUrl = await fileToCompressedDataUrl(file);
-      person.photoDataUrl = dataUrl;
-      person.photoCapturedAt = new Date().toISOString();
-      person.photoHash = await sha256Hex(dataUrl);
-      const preview = $('.photo-preview', card);
-      preview.innerHTML = `<img src="${dataUrl}" alt="Foto de ${escapeAttr(person.nome || person.role)}" />`;
-      $('.photo-status', card).textContent = `Capturada em ${formatDateTime(person.photoCapturedAt)}`;
-      markFinalizedRecordStale();
-      autoSaveDraft();
-    } catch (err) {
-      alert('Não foi possível registrar a foto: ' + err.message);
-    } finally {
-      event.target.value = '';
-    }
-  });
-
-  // Botões dentro dos cartões: registrar/limpar assinatura, limpar foto e remover profissional.
-  $('#peopleList').addEventListener('click', async event => {
-    const card = event.target.closest('.person-card');
-    if (!card) return;
-    const person = people.find(p => p.id === card.dataset.personId);
-    if (!person) return;
-    if (event.target.classList.contains('save-signature')) {
-      const canvas = $('.signature-pad', card);
-      const metrics = getSignatureCanvasMetrics(canvas);
-      if (!metrics.isSigned) {
-        clearPersonSignature(person, card);
-        markFinalizedRecordStale();
-        autoSaveDraft();
-        alert(`${person.role}: desenhe a assinatura antes de registrar. O canvas vazio não será aceito.`);
-        return;
-      }
-      person.signatureDataUrl = canvas.toDataURL('image/png');
-      person.signedAt = new Date().toISOString();
-      person.signatureHash = await sha256Hex(person.signatureDataUrl);
-      person.signatureMetrics = metrics;
-      person._dirtySignature = false;
-      $('.sig-status', card).textContent = `Assinada em ${formatDateTime(person.signedAt)}`;
-      markFinalizedRecordStale();
-      autoSaveDraft();
-    }
-    if (event.target.classList.contains('clear-signature')) {
-      clearPersonSignature(person, card);
-      markFinalizedRecordStale();
-      autoSaveDraft();
-    }
-    if (event.target.classList.contains('clear-photo')) {
-      Object.assign(person, { photoDataUrl: '', photoCapturedAt: '', photoHash: '' });
-      $('.photo-preview', card).innerHTML = '<span>Sem foto</span>';
-      $('.photo-status', card).textContent = 'Pendente de foto';
-      markFinalizedRecordStale();
-      autoSaveDraft();
-    }
-    if (event.target.classList.contains('remove-person')) {
-      people = people.filter(p => p.id !== person.id);
-      reindexPeople();
-      renderPeople();
-      markFinalizedRecordStale();
-      autoSaveDraft();
-    }
-  });
-
-  // Checklist: desktop e móvel espelham a mesma resposta. O usuário pode selecionar S/N/N/A;
-  // o avanço exige resposta, e a segurança é analisada antes da emissão oficial.
-  $('#checklistTable')?.addEventListener('change', event => {
-    const match = event.target.name?.match(/^check_(\d{2})$/);
-    if (!match) return;
-    const number = match[1];
-    const mobile = $(`[data-check-mobile="${number}"][value="${event.target.value}"]`);
-    if (mobile) mobile.checked = true;
-    updateNaJustificationVisibility(number);
-  });
-  $('#checklistTable')?.addEventListener('input', event => {
-    const match = event.target.name?.match(/^check_(\d{2})_justification$/);
-    if (!match) return;
-    const mobile = $(`[data-check-mobile-justification="${match[1]}"]`);
-    if (mobile) mobile.value = event.target.value;
-  });
-  $('#checklistCards')?.addEventListener('change', event => {
-    const number = event.target.dataset.checkMobile;
-    if (!number) return;
-    const desktop = $(`input[name="check_${number}"][value="${event.target.value}"]`);
-    if (desktop) desktop.checked = true;
-    updateNaJustificationVisibility(number);
-  });
-  $('#checklistCards')?.addEventListener('input', event => {
-    const number = event.target.dataset.checkMobileJustification;
-    if (!number) return;
-    const desktop = $(`[name="check_${number}_justification"]`);
-    if (desktop) desktop.value = event.target.value;
-  });
-
-  // Botões principais do formulário e ações de rascunho/finalização/exportação.
-  $('#addEntrante').addEventListener('click', () => addProfessional('entrante'));
-  $('#addVigia').addEventListener('click', () => addProfessional('vigia'));
-  $('#saveDraft').addEventListener('click', () => {
-    const saved = saveDraft();
-    if (saved) alert('Rascunho salvo neste dispositivo.');
-    else alert('O rascunho não pôde ser salvo. Consulte o aviso exibido na tela.');
-  });
-  $('#clearDraft').addEventListener('click', () => {
-    if (!confirm('Deseja limpar o formulário e apagar o rascunho local?')) return;
-    const draftKey = currentDraftKey();
-    if (draftKey) localStorage.removeItem(draftKey);
-    finalizedRecord = null;
-    $('#petForm').reset();
-    checklistItems.forEach((_, idx) => updateNaJustificationVisibility(String(idx + 1).padStart(2, '0')));
-    setDefaultDateTime();
-    resetPeople();
-    renderPeople();
-    $('#validationBox').className = 'validation-box';
-    $('#validationBox').textContent = 'Preencha as etapas em sequência. Cada etapa será conferida ao avançar; a emissão oficial exige login e dispositivo autorizado.';
-    $('#integrityPanel').classList.add('hidden');
-    $('#finalizeBtn').disabled = false;
-    $('#finalizeBtn').textContent = 'Finalizar PET oficial';
-    $('#registerServerBtn').disabled = true;
-    $('#registerServerBtn').classList.add('hidden');
-    $('#printBtn').disabled = true;
-    $('#sharePdfBtn').disabled = true;
-    $('#exportBtn').disabled = true;
-    $('#shareJsonBtn').disabled = true;
-    showFormStep(1, { focus: true });
-    $('#storageNotice')?.classList.add('hidden');
-  });
-
-  $('#finalizeBtn').addEventListener('click', finalizeRecord);
-  $('#registerServerBtn').addEventListener('click', event => retryPendingRecordRegistration(finalizedRecord, event.currentTarget));
-  $('#printBtn').addEventListener('click', event => openOfficialPdf(finalizedRecord, event.currentTarget));
-  $('#sharePdfBtn').addEventListener('click', event => sharePdfRecord(finalizedRecord, event.currentTarget));
-  $('#exportBtn').addEventListener('click', async () => {
-    if (!finalizedRecord) return;
-    const ready = await ensureRecordReadyForOutput(finalizedRecord, 'salvar o arquivo de validação da PET (JSON)');
-    if (!ready) return;
-    const files = await readOfficialFiles(finalizedRecord);
-    if (files?.jsonText) downloadBlob(new Blob([files.jsonText], { type: 'application/json' }), files.jsonFilename || jsonFilename(finalizedRecord));
-  });
-  $('#shareJsonBtn').addEventListener('click', event => shareJsonRecord(finalizedRecord, event.currentTarget));
-
-  // Eventos das abas auxiliares: histórico local, validador de JSON e gerenciamento da chave.
-  $('#refreshRecords').addEventListener('click', renderRecords);
-  $('#verifyFilesBtn').addEventListener('click', () => verifyFiles());
-  $('#exportPublicKey').addEventListener('click', exportPublicKey);
-  $('#resetKey').addEventListener('click', () => resetLocalDeviceProtection().catch(err => alert('Não foi possível apagar a proteção local: ' + err.message)));
-
-  // Eventos da aba Sistema: login, primeiro admin, usuários, dispositivos e validação no D1.
-  $('#setupAdminForm')?.addEventListener('submit', event => {
-    event.preventDefault();
-    setupFirstAdmin().catch(err => alert('Erro ao criar admin: ' + err.message));
-  });
-  $('#loginForm')?.addEventListener('submit', event => {
-    event.preventDefault();
-    login().catch(err => alert('Erro no login: ' + err.message));
-  });
-  $('#logoutBtn')?.addEventListener('click', () => logout());
-  $('#createUserBtn')?.addEventListener('click', () => createUser().catch(err => alert('Erro ao cadastrar usuário: ' + err.message)));
-  $('#refreshUsersBtn')?.addEventListener('click', () => refreshUsers());
-  $('#changeOwnPasswordBtn')?.addEventListener('click', () => changeOwnPassword().catch(err => alert('Erro ao alterar senha: ' + err.message)));
-  $('#saveUserEditBtn')?.addEventListener('click', () => saveUserEdit().catch(err => alert('Erro ao atualizar usuário: ' + err.message)));
-  $('#confirmResetPasswordBtn')?.addEventListener('click', () => confirmResetPassword().catch(err => alert('Erro ao redefinir senha: ' + err.message)));
-  $$('[data-close-dialog]').forEach(btn => btn.addEventListener('click', () => $('#' + btn.dataset.closeDialog)?.close()));
-  $('#usersList')?.addEventListener('click', event => {
-    const editId = event.target.dataset.userEdit;
-    const resetId = event.target.dataset.userReset;
-    const deleteId = event.target.dataset.userDelete;
-    if (editId) openEditUser(editId);
-    if (resetId) openResetPassword(resetId);
-    if (deleteId) deleteUser(deleteId).catch(err => alert('Erro ao excluir acesso: ' + err.message));
-  });
-  $('#registerDeviceBtn')?.addEventListener('click', event => registerDevice(event.currentTarget).catch(err => alert('Erro ao configurar dispositivo: ' + err.message)));
-  $('#refreshDevicesBtn')?.addEventListener('click', () => refreshDevices());
-  $('#serverValidateBtn')?.addEventListener('click', () => validateHashOnServer());
-  $('#devicesList')?.addEventListener('click', event => {
-    const approveId = event.target.dataset.deviceApprove;
-    const revokeId = event.target.dataset.deviceRevoke;
-    if (approveId) changeDeviceStatus(approveId, 'approve', event.target).catch(err => alert(err.message));
-    if (revokeId && confirm(event.target.textContent.includes('Rejeitar') ? 'Rejeitar esta solicitação?' : 'Revogar este dispositivo?')) changeDeviceStatus(revokeId, 'revoke', event.target).catch(err => alert(err.message));
-  });
-
-  $('#formPrevBtn')?.addEventListener('click', () => showFormStep(currentFormStep - 1, { focus: true }));
-  $('#formNextBtn')?.addEventListener('click', () => goToNextFormStep());
-  // Autosave com debounce para evitar perda de preenchimento durante o uso em campo.
-  // Qualquer alteração após finalizar invalida os botões PDF/arquivo de validação (JSON) até nova finalização.
-  const handleFormEdited = debounce(() => {
-    markFinalizedRecordStale();
-    autoSaveDraft();
-  }, 400);
-  $('#petForm').addEventListener('input', handleFormEdited);
-  $('#petForm').addEventListener('change', handleFormEdited);
-}
-
-/**
- * Alterna a aba visível do aplicativo.
- * Ativação: clique nos botões do menu superior.
- * O que faz: remove a classe `active` de todas as abas, ativa a aba escolhida e atualiza
- * dados específicos quando necessário, como registros ou status da chave.
- */
-function showTab(tabId) {
-  const state = authState || loadAuthState();
-  if (!state?.user) {
-    renderAuthState();
-    setTimeout(() => $('#loginMatricula')?.focus(), 100);
-    return;
+    notify('Foto registrada.', 'ok', 2000);
+  } catch (err) {
+    notify('Não foi possível registrar a foto: ' + err.message, 'bad');
   }
-  if (tabId === 'verifyTab' && !['admin','gestor','verificador'].includes(state.user.role)) { alert('Seu perfil não possui acesso à validação oficial.'); return; }
-  $$('.tab').forEach(t => t.classList.remove('active'));
-  const target = $('#' + tabId) || $('#formTab');
-  target.classList.add('active');
-  // Mostra visualmente qual área está aberta e informa `aria-current` a tecnologias assistivas.
-  $$('#appTopbar [data-tab]').forEach(button => {
-    const active = button.dataset.tab === target.id;
-    button.classList.toggle('active', active);
-    button.setAttribute('aria-current', active ? 'page' : 'false');
-  });
-  if (target.id === 'recordsTab') renderRecords();
-  if (target.id === 'systemTab') { renderAuthState(); refreshMe(); refreshDevices(true); if (['admin','gestor'].includes((authState || loadAuthState())?.user?.role)) refreshUsers(); }
 }
 
+/* =====================================================================
+ * NAVEGAÇÃO ENTRE ETAPAS
+ * ===================================================================== */
+
+/** Alterna entre formulário, editor de pessoa e tela de conclusão dentro da aba Nova PET. */
+function showFormView(view) {
+  $('#formView')?.classList.toggle('hidden', view !== 'form');
+  $('#personView')?.classList.toggle('hidden', view !== 'person');
+  $('#doneView')?.classList.toggle('hidden', view !== 'done');
+  updateStepBar();
+}
+
+/** A barra Voltar/Próxima só aparece no formulário da aba Nova PET. */
+function updateStepBar() {
+  const logged = !!(authState || loadAuthState())?.user;
+  const formTabActive = $('#formTab')?.classList.contains('active');
+  const formVisible = !$('#formView')?.classList.contains('hidden');
+  const show = logged && formTabActive && formVisible;
+  $('#stepBar')?.classList.toggle('hidden', !show);
+  $('#appShell')?.classList.toggle('with-bar', show);
+}
 
 /**
- * Preenche data e hora padrão sem sobrescrever valores existentes.
- * Ativação: inicialização e limpeza do formulário.
- * O que faz: se os campos estiverem vazios, usa a data atual e a hora local atual.
+ * Exibe uma etapa do formulário.
+ * O quê: mostra a seção, atualiza título, segmentos de progresso e rótulos da barra inferior.
+ * Quando: navegação Voltar/Próxima, links "Corrigir" da revisão e reinício do formulário.
  */
 function showFormStep(step, options = {}) {
   const normalized = Math.min(FORM_STEPS.length, Math.max(1, Number(step) || 1));
   currentFormStep = normalized;
   $$('[data-form-step]').forEach(section => section.classList.toggle('form-step-hidden', Number(section.dataset.formStep) !== normalized));
-  const progress = $('#formProgressBar');
-  if (progress) { progress.value = normalized; progress.textContent = `${normalized} de ${FORM_STEPS.length}`; }
-  const label = $('#formProgressLabel');
-  if (label) label.textContent = `Etapa ${normalized} de ${FORM_STEPS.length}: ${FORM_STEPS[normalized - 1].label}`;
-  const counter = $('#formStepCounter');
-  if (counter) counter.textContent = `${normalized} / ${FORM_STEPS.length}`;
+  const title = $('#stepTitle');
+  if (title) title.textContent = FORM_STEPS[normalized - 1].label;
+  const counter = $('#stepCounter');
+  if (counter) counter.textContent = `Etapa ${normalized} de ${FORM_STEPS.length}`;
+  $$('#stepSegments span').forEach((seg, idx) => {
+    seg.classList.toggle('done', idx + 1 < normalized);
+    seg.classList.toggle('current', idx + 1 === normalized);
+  });
   const prev = $('#formPrevBtn');
-  const next = $('#formNextBtn');
   if (prev) prev.disabled = normalized === 1;
-  if (next) { next.disabled = normalized === FORM_STEPS.length; next.textContent = normalized === FORM_STEPS.length ? 'Concluir abaixo' : 'Próxima etapa'; }
-  const stepBox = $('#stepValidationBox');
-  if (stepBox && !options.keepMessage) { stepBox.className = 'step-validation hidden'; stepBox.textContent = ''; }
-  if (options.focus) {
-    const target = $(`[data-form-step="${normalized}"]`);
-    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    target?.querySelector('input, textarea, select, button')?.focus({ preventScroll: true });
+  const next = $('#formNextBtn');
+  if (next) {
+    next.textContent = normalized < 5 ? 'Próxima etapa' : normalized === 5 ? 'Revisar' : 'Finalizar PET';
+    next.classList.toggle('success', normalized === 6);
+    next.classList.toggle('primary', normalized !== 6);
   }
+  $('#discardConfirm')?.classList.add('hidden');
+  if (normalized === 6) renderReview();
+  refreshStepIssues();
+  if (!options.keepScroll) window.scrollTo({ top: 0, behavior: options.smooth ? 'smooth' : 'auto' });
 }
 
-/** Exibe erros/alertas da etapa atual sem obrigar o usuário a esperar a finalização. */
-function showStepValidation(result) {
-  const box = $('#stepValidationBox');
-  if (!box) return;
-  if ((!result.errors?.length) && (!result.warnings?.length)) {
-    box.className = 'step-validation ok';
-    box.textContent = 'Etapa conferida. Você pode continuar.';
-    return;
-  }
-  box.className = 'step-validation ' + (result.errors?.length ? 'bad' : 'warn');
-  const text = [];
-  if (result.errors?.length) text.push('Corrija antes de continuar:\n- ' + result.errors.join('\n- '));
-  if (result.warnings?.length) text.push('Atenção:\n- ' + result.warnings.join('\n- '));
-  box.textContent = text.join('\n');
-}
-
-/** Valida a etapa atual e só então avança para a próxima. */
+/** Valida a etapa atual; com pendências, mostra o resumo e leva ao primeiro campo. */
 function goToNextFormStep() {
-  const result = validateFormStep(currentFormStep, { finalSafety: false });
-  showStepValidation(result);
+  if (currentFormStep === 6) { finalizeRecord(); return; }
+  const result = validateFormStep(currentFormStep);
   if (!result.ok) {
-    focusFirstFormIssue(result);
+    triedSteps.add(currentFormStep);
+    refreshStepIssues();
+    if (currentFormStep === 4) renderPeople();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
     return;
   }
-  showFormStep(currentFormStep + 1, { focus: true });
+  if (result.warnings?.length) notify(result.warnings.join('\n'), 'info', 6000);
+  showFormStep(currentFormStep + 1);
 }
-
 
 /**
- * Coleta os campos gerais do formulário.
- * Ativação: montagem do payload final da PET.
- * O que faz: lê FormData, ignora checklist porque ele tem estrutura própria, normaliza
- * textos e acrescenta userAgent, versão do app e data/hora da coleta.
+ * Leva a tela ao campo/cartão com problema e coloca o foco nele.
+ * (Na v1.1.6 esta função era chamada como `focusFirstFormIssue`, mas não existia.)
  */
+function focusIssue(target) {
+  if (!target) return;
+  target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const focusable = target.matches?.('input, textarea, select, button') ? target : target.querySelector?.('input, textarea, select, button');
+  setTimeout(() => focusable?.focus({ preventScroll: true }), 250);
+}
+
+/**
+ * Mostra o resumo de pendências da etapa atual e marca os campos em vermelho.
+ * Só age em etapas em que o usuário já tentou avançar; depois disso, atualiza sozinho
+ * conforme ele corrige (o vermelho some quando o campo é preenchido).
+ */
+function refreshStepIssues() {
+  const box = $('#stepErrorBox');
+  $$('.is-invalid, .is-missing').forEach(el => el.classList.remove('is-invalid', 'is-missing'));
+  if (!box) return;
+  const step = currentFormStep;
+  if (step === 6 || !triedSteps.has(step)) { box.classList.add('hidden'); return; }
+  const result = validateFormStep(step);
+  result.issues.forEach(issue => {
+    if (!issue.target) return;
+    if (issue.target.matches?.('fieldset, .person-row, .consent-card')) issue.target.classList.add('is-missing');
+    else issue.target.classList.add('is-invalid');
+  });
+  if (!result.issues.length) { box.classList.add('hidden'); return; }
+  const blocking = result.issues.find(i => i.blocking);
+  $('#stepErrorTitle').textContent = blocking ? blocking.message
+    : result.issues.length === 1 ? 'Falta 1 informação nesta etapa' : `Faltam ${result.issues.length} informações nesta etapa`;
+  const lines = result.issues.filter(i => !i.blocking).slice(0, 4).map(i => `<li>${escapeHtml(i.message)}</li>`);
+  const extra = result.issues.filter(i => !i.blocking).length - 4;
+  if (extra > 0) lines.push(`<li>e mais ${extra}</li>`);
+  $('#stepErrorList').innerHTML = lines.join('');
+  $('#stepErrorGo').onclick = () => focusIssue(result.issues[0].target);
+  box.classList.remove('hidden');
+}
+
+/* =====================================================================
+ * COLETA DE DADOS
+ * ===================================================================== */
+
+/** Coleta os campos gerais (o checklist e a equipe têm estrutura própria). */
 function collectFormFields() {
-  syncPeopleFromInputs();
   const form = $('#petForm');
   const data = new FormData(form);
   const fields = {};
   for (const [key, value] of data.entries()) {
-    if (key.startsWith('check_') || key.startsWith('check_mobile_')) continue;
+    if (key.startsWith('check_')) continue;
     fields[key] = normalizeText(value);
   }
   const supervisor = people.find(person => person.type === 'supervisor');
@@ -939,12 +818,7 @@ function collectFormFields() {
   return fields;
 }
 
-
-/**
- * Coleta as respostas do checklist.
- * Ativação: validação e montagem do payload final.
- * O que faz: percorre os 22 itens e retorna número, texto do item e resposta selecionada.
- */
+/** Respostas do checklist na ordem oficial (01 a 22). */
 function collectChecklist() {
   return checklistItems.map((item, idx) => {
     const n = String(idx + 1).padStart(2, '0');
@@ -954,14 +828,8 @@ function collectChecklist() {
   });
 }
 
-/**
- * Coleta a relação de profissionais para o dossiê.
- * Ativação: validação, salvamento de rascunho e montagem do payload final.
- * O que faz: sincroniza inputs com a memória e retorna dados essenciais, foto, assinatura
- * e hashes de cada participante.
- */
+/** Equipe para o dossiê: dados, foto, assinatura e hashes. */
 function collectPeople() {
-  syncPeopleFromInputs();
   return people.map(p => ({
     role: p.role,
     type: p.type,
@@ -978,26 +846,9 @@ function collectPeople() {
   }));
 }
 
-/**
- * Sincroniza nome e matrícula digitados nos cartões com o array `people`.
- * Ativação: antes de coletar, validar, salvar rascunho ou adicionar/remover pessoa.
- * O que faz: procura cada cartão no DOM e copia seus inputs para o objeto correspondente.
- */
-function syncPeopleFromInputs() {
-  $$('.person-card').forEach(card => {
-    const person = people.find(p => p.id === card.dataset.personId);
-    if (!person) return;
-    person.nome = $('[data-field="nome"]', card).value;
-    person.matricula = $('[data-field="matricula"]', card).value;
-  });
-}
+/** Mantido por compatibilidade: na v1.2.0 o editor grava direto no array `people`. */
+function syncPeopleFromInputs() {}
 
-/**
- * Gera automaticamente o número da PET.
- * Ativação: montagem do payload, no momento da finalização.
- * O que faz: combina data da PET, hora ISO atual e sufixo aleatório curto para formar
- * identificador legível e com baixa chance de colisão.
- */
 function generatePetNumber(fields) {
   const datePart = (fields.data || todayISO()).replace(/-/g, '');
   const now = new Date();
@@ -1006,10 +857,7 @@ function generatePetNumber(fields) {
   return `PET-${datePart}-${timePart}-${randomPart}`;
 }
 
-/**
- * Monta o payload assinado. O número é criado uma única vez por tentativa oficial.
- * O emissor autenticado também entra no payload, vinculando usuário, matrícula e conteúdo.
- */
+/** Monta o payload assinado. O número é criado uma única vez por tentativa oficial. */
 function buildPayload(existingPetNumber = '') {
   const fields = collectFormFields();
   fields.petNumero = existingPetNumber || generatePetNumber(fields);
@@ -1029,266 +877,283 @@ function buildPayload(existingPetNumber = '') {
   };
 }
 
-/** Valida somente os campos HTML obrigatórios que pertencem a uma etapa. */
-function validateRequiredFieldsInStep(step) {
-  const section = $(`[data-form-step="${step}"]`);
-  const errors = [];
-  let firstInvalid = null;
-  if (!section) return { errors, firstInvalid };
-  $$('input[required], textarea[required], select[required]', section).forEach(element => {
-    // Os radios móveis espelham o checklist desktop e não devem duplicar a validação nativa.
-    if (element.name?.startsWith('check_mobile_')) return;
-    if (!element.checkValidity()) {
-      if (!firstInvalid) firstInvalid = element;
-      const label = element.getAttribute('aria-label') || element.closest('label')?.firstChild?.textContent?.trim() || element.name || 'campo obrigatório';
-      errors.push(`Preencha corretamente: ${label}.`);
-    }
-  });
-  return { errors, firstInvalid };
-}
-
-/** Retorna o controle de checklist visível no dispositivo para levar o usuário ao erro certo. */
-function checklistIssueTarget(number, kind = 'radio') {
-  const mobile = window.matchMedia?.('(max-width: 760px)')?.matches;
-  if (kind === 'justification') {
-    return mobile ? $(`[data-check-mobile-justification="${number}"]`) : $(`[name="check_${number}_justification"]`);
-  }
-  return mobile ? $(`[data-check-mobile="${number}"]`) : $(`input[name="check_${number}"]`);
-}
-
 /**
- * Valida o checklist.
- * O quê: exige que todos os itens recebam uma resposta e que N/A possua justificativa.
- * Como: aceita Sim, Não e N/A como respostas válidas; nenhuma dessas alternativas, por si só,
- * bloqueia o avanço ou a emissão. Situações que merecem atenção aparecem somente como aviso.
- * Quando: ao avançar da etapa 2 e novamente na finalização.
+ * "Impressão digital" do que está preenchido (sem as imagens, só os hashes delas).
+ * Usada para saber se o formulário mudou desde a tentativa que ficou pendente.
  */
-function validateChecklistSection({ finalSafety = false } = {}) {
-  const checklist = collectChecklist();
-  const errors = [];
-  const warnings = [];
-  let firstInvalid = null;
-
-  checklist.forEach(c => {
-    if (!c.answer) {
-      errors.push(`Item ${c.number}: selecione Sim, Não ou N/A.`);
-      if (!firstInvalid) firstInvalid = checklistIssueTarget(c.number);
-    }
-    if (c.answer === 'NA' && !normalizeText(c.justification)) {
-      errors.push(`Item ${c.number}: informe uma justificativa para N/A.`);
-      if (!firstInvalid) firstInvalid = checklistIssueTarget(c.number, 'justification');
-    }
+async function formFingerprint() {
+  return sha256Hex({
+    fields: serializeForm(),
+    people: collectPeople().map(p => ({ ...p, photoDataUrl: undefined, signatureDataUrl: undefined, signatureMetrics: undefined }))
   });
-
-  const naItems = checklist.filter(c => c.answer === 'NA');
-  if (naItems.length > MAX_NA_ITEMS_WARNING) {
-    warnings.push(`Há ${naItems.length} itens marcados N/A. Confira se as respostas correspondem à condição observada.`);
-  }
-
-  const answer = number => checklist.find(c => c.number === number)?.answer;
-  const negativeItems = checklist.filter(c => c.answer === 'N');
-  if (negativeItems.length) warnings.push(`Há ${negativeItems.length} item(ns) marcado(s) como NÃO (${negativeItems.map(c => c.number).join(', ')}).`);
-  if (answer('12') === 'S') warnings.push('O item 12 registra atmosfera IPVS. Verifique as medidas de segurança aplicáveis antes da entrada.');
-  if (answer('15') === 'S' && answer('19') !== 'S') warnings.push('O item 15 registra necessidade de ar mandado e o item 19 não está marcado como Sim. Confira a condição registrada.');
-  if (answer('20') === 'S') warnings.push('O item 20 registra necessidade de ferramentas intrinsecamente seguras. Confira a especificação utilizada.');
-
-  return { errors, warnings, firstInvalid, checklist };
 }
 
-/** Valida identificação, detector e dados gerais da etapa 1. */
+/* =====================================================================
+ * VALIDAÇÃO
+ * Cada regra devolve { message, target, blocking? }. `target` é o elemento destacado.
+ * ===================================================================== */
+
 function validateIdentificationSection() {
-  const base = validateRequiredFieldsInStep(1);
-  const errors = [...base.errors];
-  const warnings = [];
-  let firstInvalid = base.firstInvalid;
   const form = $('#petForm');
-  if (!normalizeText(form.elements.detectorId?.value)) {
-    errors.push('Informe o identificador do detector.');
-    firstInvalid ||= form.elements.detectorId;
-  }
-  if (!form.elements.detectorCalibracao?.value) {
-    errors.push('Informe a validade/calibração do detector.');
-    firstInvalid ||= form.elements.detectorCalibracao;
-  }
-  if (form.elements.detectorCalibracao?.value && form.elements.detectorCalibracao.value < (form.elements.data?.value || todayISO())) {
-    errors.push('A validade/calibração do detector está vencida na data da PET.');
-    firstInvalid ||= form.elements.detectorCalibracao;
-  }
+  const issues = [];
+  const warnings = [];
+  [['unidade', 'Nome da unidade'], ['local', 'Local do espaço confinado'], ['data', 'Data'], ['horaEmissao', 'Hora da emissão'], ['horaTermino', 'Hora do término'], ['trabalho', 'Trabalho a ser realizado']]
+    .forEach(([name, label]) => { if (!normalizeText(form.elements[name]?.value)) issues.push({ message: label, target: form.elements[name] }); });
+  if (!$('input[name="equipeSalvamento"]:checked')) issues.push({ message: 'Equipe de salvamento', target: $('#salvamentoGroup') });
+  if (!normalizeText(form.elements.detectorId?.value)) issues.push({ message: 'Nº de série do detector', target: form.elements.detectorId });
+  const calib = form.elements.detectorCalibracao?.value;
+  if (!calib) issues.push({ message: 'Validade da calibração do detector', target: form.elements.detectorCalibracao });
+  else if (calib < (form.elements.data?.value || todayISO())) issues.push({ message: 'Calibração do detector vencida na data da PET', target: form.elements.detectorCalibracao });
   const emission = form.elements.horaEmissao?.value;
   const termino = form.elements.horaTermino?.value;
-  if (emission && termino && termino <= emission) warnings.push('Hora de término igual ou anterior à emissão. Confira se o serviço atravessa a meia-noite.');
-  return { ok: errors.length === 0, errors, warnings, firstInvalid };
+  if (emission && termino && termino <= emission) warnings.push('A hora de término é igual ou anterior à emissão. Confira se o serviço atravessa a meia-noite.');
+  return { issues, warnings };
 }
 
-/** Valida limites, preenchimento, fotos e assinaturas dos participantes da etapa 4. */
-function validatePeopleSection() {
-  syncPeopleFromInputs();
-  const errors = [];
+function validateChecklistSection() {
+  const issues = [];
   const warnings = [];
-  let firstInvalid = null;
-  const typeCounts = people.reduce((acc, p) => { acc[p.type] = (acc[p.type] || 0) + 1; return acc; }, {});
-  if (people.length > MAX_PARTICIPANTS) errors.push(`A equipe excede o limite de ${MAX_PARTICIPANTS} participantes.`);
-  if ((typeCounts.entrante || 0) > MAX_ENTRANTES) errors.push(`A equipe excede o limite de ${MAX_ENTRANTES} entrantes.`);
-  if ((typeCounts.vigia || 0) > MAX_VIGIAS) errors.push(`A equipe excede o limite de ${MAX_VIGIAS} vigias.`);
-  if (!typeCounts.entrante) errors.push('Inclua pelo menos um entrante.');
-  if (!typeCounts.vigia) errors.push('Inclua pelo menos um vigia.');
-  if (typeCounts.supervisor !== 1) errors.push('Inclua exatamente um supervisor de entrada.');
-  people.forEach(p => {
-    const card = $(`.person-card[data-person-id="${p.id}"]`);
-    if (!normalizeText(p.nome)) { errors.push(`${p.role}: nome obrigatório.`); firstInvalid ||= $('[data-field="nome"]', card); }
-    if (!normalizeText(p.matricula)) { errors.push(`${p.role}: matrícula obrigatória.`); firstInvalid ||= $('[data-field="matricula"]', card); }
-    if (!p.photoDataUrl) { errors.push(`${p.role}: foto obrigatória, com rosto e crachá funcional visível.`); firstInvalid ||= card; }
-    if (!p.signatureDataUrl) { errors.push(`${p.role}: registre a assinatura antes de continuar.`); firstInvalid ||= card; }
-    if (p._dirtySignature) { errors.push(`${p.role}: a assinatura foi alterada; clique em “Registrar assinatura” novamente.`); firstInvalid ||= card; }
-    if (p.signatureDataUrl && p.signatureMetrics && !p.signatureMetrics.isSigned) { errors.push(`${p.role}: assinatura inválida ou vazia.`); firstInvalid ||= card; }
+  const checklist = collectChecklist();
+  const byNumber = Object.fromEntries(checklist.map(c => [c.number, c]));
+  CHECKLIST_DISPLAY_ORDER.forEach(n => {
+    const c = byNumber[n];
+    if (!c.answer) issues.push({ message: `Item ${n} sem resposta`, target: $(`#ck-${n}`) });
+    else if (c.answer === 'NA' && !normalizeText(c.justification)) issues.push({ message: `Item ${n}: justificativa do N/A`, target: $(`[name="check_${n}_justification"]`) });
   });
-  const matriculas = new Map();
+  return { issues, warnings, checklist };
+}
+
+function validateGasSection() {
+  const form = $('#petForm');
+  const issues = [];
+  const check = (prefix, label) => {
+    if (!form.elements[`${prefix}_hora`]?.value) issues.push({ message: `${label}: hora da medição`, target: form.elements[`${prefix}_hora`] });
+    GAS_LIMITS.forEach(limit => {
+      const el = form.elements[`${prefix}_${limit.key}`];
+      const value = parseGasValue(el?.value);
+      if (value === null) issues.push({ message: `${label}: ${limit.label}`, target: el });
+      else if (Number.isNaN(value) || value < 0) issues.push({ message: `${label}: valor inválido em ${limit.label}`, target: el });
+    });
+  };
+  check('gas_inicial', 'Teste inicial');
+  const initial = evaluateGasTest('gas_inicial');
+  const vent = evaluateGasTest('gas_ventilacao');
+  if (initial.out || vent.any) {
+    check('gas_ventilacao', 'Após ventilação');
+    if (vent.complete && vent.out) {
+      issues.unshift({ message: 'Após a ventilação a atmosfera continua fora do limite. A entrada não pode ser autorizada.', target: form.elements.gas_ventilacao_o2, blocking: true });
+    }
+  }
+  return { issues, warnings: [] };
+}
+
+function validatePeopleSection() {
+  const issues = [];
+  const counts = people.reduce((acc, p) => { acc[p.type] = (acc[p.type] || 0) + 1; return acc; }, {});
+  if (people.length > MAX_PARTICIPANTS) issues.push({ message: `A equipe excede ${MAX_PARTICIPANTS} participantes`, target: $('#peopleList') });
+  if ((counts.entrante || 0) > MAX_ENTRANTES) issues.push({ message: `A equipe excede ${MAX_ENTRANTES} entrantes`, target: $('#peopleList') });
+  if ((counts.vigia || 0) > MAX_VIGIAS) issues.push({ message: `A equipe excede ${MAX_VIGIAS} vigias`, target: $('#peopleList') });
+  if (!counts.entrante) issues.push({ message: 'Inclua pelo menos um entrante', target: $('#addEntrante') });
+  if (!counts.vigia) issues.push({ message: 'Inclua pelo menos um vigia', target: $('#addVigia') });
+  if (counts.supervisor !== 1) issues.push({ message: 'A PET precisa de exatamente um supervisor de entrada', target: $('#peopleList') });
+  people.forEach(p => {
+    const falta = [];
+    if (!normalizeText(p.nome)) falta.push('nome');
+    if (!normalizeText(p.matricula)) falta.push('matrícula');
+    if (!p.photoDataUrl) falta.push('foto');
+    if (!p.signatureDataUrl) falta.push('assinatura');
+    if (falta.length) issues.push({ message: `${personLabel(p)}: falta ${falta.join(', ')}`, target: $(`#pp-${CSS.escape(p.id)}`) });
+  });
+  const seen = new Map();
   people.forEach(p => {
     const mat = normalizeText(p.matricula).toLowerCase();
     if (!mat) return;
-    const list = matriculas.get(mat) || [];
-    list.push(p.role);
-    matriculas.set(mat, list);
+    if (seen.has(mat)) issues.push({ message: `Matrícula ${mat} repetida (${seen.get(mat)} e ${personLabel(p)})`, target: $(`#pp-${CSS.escape(p.id)}`) });
+    else seen.set(mat, personLabel(p));
   });
-  matriculas.forEach((roles, mat) => {
-    if (roles.length > 1) {
-      errors.push(`Matrícula repetida (${mat}) em: ${roles.join(', ')}.`);
-      if (!firstInvalid) firstInvalid = $('#peopleList');
-    }
-  });
-  updateSupervisorAutoDisplay();
-  return { ok: errors.length === 0, errors, warnings, firstInvalid };
+  return { issues, warnings: [] };
 }
 
-/** Valida uma etapa específica. A etapa 2 alerta sobre segurança, mas permite concluir o restante do formulário. */
-function validateFormStep(step, options = {}) {
-  const finalSafety = Boolean(options.finalSafety);
-  if (step === 1) return validateIdentificationSection();
-  if (step === 2) {
-    const result = validateChecklistSection({ finalSafety });
-    return { ok: result.errors.length === 0, errors: result.errors, warnings: result.warnings, firstInvalid: result.firstInvalid };
-  }
-  if (step === 3) {
-    const gas = checkGasMeasurements();
-    return { ok: gas.errors.length === 0, ...gas };
-  }
-  if (step === 4) return validatePeopleSection();
-  if (step === 5) {
-    const base = validateRequiredFieldsInStep(5);
-    return { ok: base.errors.length === 0, errors: base.errors, warnings: [], firstInvalid: base.firstInvalid };
-  }
-  return { ok: true, errors: [], warnings: [], firstInvalid: null };
+function validateConsentSection() {
+  const input = $('#petForm').elements.declaracaoCiencia;
+  return { issues: input?.checked ? [] : [{ message: 'Confirmação de ciência da equipe', target: $('#cienciaCard') }], warnings: [] };
 }
 
-/** Executa todas as regras impeditivas antes da emissão oficial. */
+/** Valida uma etapa. Sim, Não e N/A nunca bloqueiam; só falta de resposta/justificativa. */
+function validateFormStep(step) {
+  let result = { issues: [], warnings: [] };
+  if (step === 1) result = validateIdentificationSection();
+  if (step === 2) result = validateChecklistSection();
+  if (step === 3) result = validateGasSection();
+  if (step === 4) result = validatePeopleSection();
+  if (step === 5) result = validateConsentSection();
+  return { ...result, ok: result.issues.length === 0, errors: result.issues.map(i => i.message) };
+}
+
+/** Executa todas as regras antes da emissão; devolve as etapas com pendência. */
 function validateCurrentForm() {
-  syncPeopleFromInputs();
+  const pendingSteps = [];
   const errors = [];
   const warnings = [];
-  let firstInvalid = null;
-  [1,2,3,4,5].forEach(step => {
-    const result = validateFormStep(step, { finalSafety: step === 2 });
-    errors.push(...(result.errors || []));
+  [1, 2, 3, 4, 5].forEach(step => {
+    const result = validateFormStep(step);
+    if (!result.ok) pendingSteps.push({ step, count: result.issues.length, first: result.issues[0] });
+    errors.push(...result.errors);
     warnings.push(...(result.warnings || []));
-    firstInvalid ||= result.firstInvalid;
   });
   if (!crypto?.subtle) errors.push('Este navegador não oferece os recursos criptográficos necessários.');
-  return { ok: errors.length === 0, errors: [...new Set(errors)], warnings: [...new Set(warnings)], firstInvalid };
+  return { ok: errors.length === 0, errors, warnings, pendingSteps };
+}
+
+/* =====================================================================
+ * REVISÃO (ETAPA 6)
+ * ===================================================================== */
+
+function reviewBlock(title, step, inner) {
+  return `<div class="card review-card">
+    <div class="row-between"><h3>${escapeHtml(title)}</h3><button type="button" class="link" data-go-step="${step}">Corrigir</button></div>
+    ${inner}
+  </div>`;
+}
+
+function reviewItem(k, v) {
+  return `<div class="review-item"><span class="k">${escapeHtml(k)}</span><span class="v">${escapeHtml(v || '—')}</span></div>`;
+}
+
+function formatGasLine(test) {
+  return GAS_LIMITS.map(limit => {
+    const v = test.values[limit.key];
+    const shown = v === null ? '—' : String(v).replace('.', ',');
+    return `${limit.short} ${shown}${limit.key === 'o2' || limit.key === 'lie' ? '%' : ' ppm'}`;
+  }).join(' · ');
 }
 
 /**
- * Valida medições atmosféricas.
- * O quê: impede números negativos e só libera valores fora dos limites após um teste pós-ventilação completo e seguro.
- * Como: a medição inicial é obrigatória; a segunda é exigida quando a primeira estiver fora dos limites ou quando tiver sido iniciada.
- * Quando: ao avançar da etapa Atmosfera e novamente na emissão oficial/Worker.
+ * Monta a tela de revisão: pendências, identificação, checklist (com NÃO e N/A em destaque),
+ * medições e equipe, cada bloco com "Corrigir".
  */
-function checkGasMeasurements() {
-  const form = $('#petForm');
-  const errors = [];
-  const warnings = [];
-  let firstInvalid = null;
-  function raw(name) { return form.elements[name]?.value ?? ''; }
-  function val(name) {
-    const value = raw(name);
-    if (value === '') return null;
-    const n = Number(String(value).replace(',', '.'));
-    return Number.isFinite(n) ? n : null;
+function renderReview() {
+  const box = $('#reviewContent');
+  if (!box) return;
+  const f = collectFormFields();
+  const checklist = collectChecklist();
+  const validation = validateCurrentForm();
+  const pending = $('#reviewPending');
+  if (pending) {
+    if (validation.pendingSteps.length) {
+      pending.innerHTML = `<strong>Ainda há pendências</strong>${validation.pendingSteps.map(p =>
+        `<button type="button" class="link" data-go-step="${p.step}">Etapa ${p.step} — ${escapeHtml(FORM_STEPS[p.step - 1].label)}: ${p.count} ${p.count === 1 ? 'pendência' : 'pendências'}</button>`).join('')}`;
+      pending.classList.remove('hidden');
+    } else pending.classList.add('hidden');
   }
-  function evaluate(key, label, required) {
-    const hourEl = form.elements[`gas_${key}_hora`];
-    const values = {
-      o2: val(`gas_${key}_o2`), lie: val(`gas_${key}_lie`), h2s: val(`gas_${key}_h2s`), co: val(`gas_${key}_co`)
-    };
-    const any = Boolean(hourEl?.value) || Object.values(values).some(v => v !== null) || normalizeText(form.elements[`gas_${key}_obs`]?.value);
-    if (!required && !any) return { present: false, complete: false, safe: false, values };
-    let complete = true;
-    if (!hourEl?.value) { errors.push(`${label}: informe a hora.`); firstInvalid ||= hourEl; complete = false; }
-    for (const [code, value] of Object.entries(values)) {
-      const el = form.elements[`gas_${key}_${code}`];
-      if (value === null) { errors.push(`${label}: preencha ${code.toUpperCase()}.`); firstInvalid ||= el; complete = false; }
-      else if (value < 0) { errors.push(`${label}: ${code.toUpperCase()} não pode ser negativo.`); firstInvalid ||= el; complete = false; }
-    }
-    const safe = complete && values.o2 > 19.5 && values.o2 < 23 && values.lie < 10 && values.h2s < 5 && values.co < 25;
-    return { present: true, complete, safe, values };
-  }
-  const initial = evaluate('inicial', 'Teste inicial', true);
-  const ventilationStarted = Boolean(raw('gas_ventilacao_hora') || raw('gas_ventilacao_o2') || raw('gas_ventilacao_lie') || raw('gas_ventilacao_h2s') || raw('gas_ventilacao_co') || normalizeText(raw('gas_ventilacao_obs')));
-  const after = evaluate('ventilacao', 'Teste após ventilação', !initial.safe || ventilationStarted);
-  if (initial.complete && !initial.safe) {
-    warnings.push('A medição inicial ficou fora dos limites de referência; o teste após ventilação é obrigatório para demonstrar condição segura.');
-    if (!after.present || !after.complete) {
-      errors.push('Conclua o teste após ventilação antes de continuar.');
-      firstInvalid ||= form.elements.gas_ventilacao_hora;
-    } else if (!after.safe) {
-      errors.push('O teste após ventilação permanece fora dos limites seguros. A entrada não pode ser autorizada.');
-      firstInvalid ||= form.elements.gas_ventilacao_o2;
-    }
-  } else if (after.present && after.complete && !after.safe) {
-    errors.push('O teste após ventilação está fora dos limites seguros.');
-    firstInvalid ||= form.elements.gas_ventilacao_o2;
-  }
-  return { errors, warnings, firstInvalid };
+  const sup = people.find(p => p.type === 'supervisor');
+  const ident = [
+    reviewItem('Unidade e local', `${f.unidade || '—'} · ${f.local || '—'}`),
+    reviewItem('Data e horário', `${formatDate(f.data)}, das ${f.horaEmissao || '—'} às ${f.horaTermino || '—'}`),
+    reviewItem('Trabalho', f.trabalho),
+    reviewItem('Supervisor de entrada', sup?.nome ? `${sup.nome} (${sup.matricula || 'sem matrícula'})` : ''),
+    reviewItem('Equipe de salvamento', `${f.equipeSalvamento || '—'} · ${f.telefoneSalvamento || ''}`)
+  ].join('');
+  const s = checklist.filter(c => c.answer === 'S').length;
+  const n = checklist.filter(c => c.answer === 'N');
+  const na = checklist.filter(c => c.answer === 'NA');
+  const checklistHtml = `<div class="counts">
+      <div class="count s"><b>${s}</b><small>Sim</small></div>
+      <div class="count n"><b>${n.length}</b><small>Não</small></div>
+      <div class="count na"><b>${na.length}</b><small>N/A</small></div>
+    </div>
+    ${n.length ? `<div class="review-list n"><span class="title">Itens marcados como NÃO — confira antes de emitir</span>${n.map(c => `<span><strong>${c.number}</strong> — ${escapeHtml(c.item)}</span>`).join('')}</div>` : ''}
+    ${na.length ? `<div class="review-list na"><span class="title">Itens N/A e justificativas</span>${na.map(c => `<span><strong>${c.number}</strong> — ${escapeHtml(c.item)}<br><em>“${escapeHtml(c.justification || 'sem justificativa')}”</em></span>`).join('')}</div>` : ''}`;
+  const initial = evaluateGasTest('gas_inicial');
+  const vent = evaluateGasTest('gas_ventilacao');
+  const gasRow = (label, t) => {
+    const status = t.safe ? ['status-ok', 'Dentro do limite'] : t.complete ? ['status-bad', 'Fora do limite'] : ['status-neutral', 'Incompleto'];
+    return `<div class="review-item"><div class="review-row"><strong>${escapeHtml(label)}${t.hora ? ' — ' + escapeHtml(t.hora) : ''}</strong><span class="status-chip ${status[0]}">${status[1]}</span></div><span class="v">${escapeHtml(formatGasLine(t))}</span></div>`;
+  };
+  const gasHtml = gasRow('Teste inicial', initial)
+    + ((initial.out || vent.any) ? gasRow('Após ventilação', vent) : '')
+    + `<span class="muted small-text">Detector: ${escapeHtml(f.detectorId || '—')}${f.detectorCalibracao ? `, calibração válida até ${escapeHtml(formatDate(f.detectorCalibracao))}` : ''}</span>`;
+  const teamHtml = people.map(p => {
+    const ok = personIsComplete(p);
+    return `<div class="review-row"><span><strong>${escapeHtml(personLabel(p))}</strong><br>${escapeHtml(p.nome || 'Nome não informado')}${p.matricula ? ' · ' + escapeHtml(p.matricula) : ''}</span><span class="status-chip ${ok ? 'status-ok' : 'status-bad'}">${ok ? 'Completo' : 'Pendente'}</span></div>`;
+  }).join('');
+  box.innerHTML = reviewBlock('Identificação', 1, ident)
+    + reviewBlock('Checklist', 2, checklistHtml)
+    + reviewBlock('Medições', 3, gasHtml)
+    + reviewBlock('Equipe', 4, teamHtml)
+    + reviewBlock('Ciência e observações', 5, reviewItem('Declaração de ciência', $('#petForm').elements.declaracaoCiencia?.checked ? 'Confirmada' : 'Não confirmada') + reviewItem('Observações', f.observacoes));
+  updateDeviceChip();
+  renderPendingAttempt();
 }
 
+/** Mostra, na revisão, o aviso de tentativa gerada e ainda não registrada. */
+function renderPendingAttempt() {
+  const box = $('#pendingAttemptBox');
+  if (!box) return;
+  const pending = finalizedRecord && !finalizedRecord.serverRegistration && finalizedRecord.pendingOfficialRegistration;
+  box.classList.toggle('hidden', !pending);
+  if (pending) {
+    $('#pendingAttemptText').textContent = `A PET ${finalizedRecord.payload?.fields?.petNumero || finalizedRecord.recordId} já foi gerada, mas o envio ao sistema não terminou. Repita o envio: o mesmo número e os mesmos arquivos serão usados, sem criar outra PET.`;
+  }
+}
+
+/* =====================================================================
+ * EMISSÃO
+ * ===================================================================== */
+
 /**
- * Exibe o resultado da validação na interface.
- * Ativação: botão 'Validar' e tentativa de finalização.
- * O que faz: aplica classe visual de sucesso/alerta/erro e lista impedimentos e avisos.
+ * Descarta uma tentativa gerada e não registrada.
+ * Ela fica marcada como "cancelada antes do registro" em Minhas PETs e perde o botão de reenvio.
  */
-function showValidation(result) {
-  const box = $('#validationBox');
-  box.className = 'validation-box ' + (result.ok ? (result.warnings.length ? 'warn' : 'ok') : 'bad');
-  const lines = [];
-  lines.push(result.ok ? 'VALIDAÇÃO CONCLUÍDA: sem impeditivos automáticos.' : 'VALIDAÇÃO COM IMPEDITIVOS: corrija antes de finalizar.');
-  if (result.errors.length) lines.push('\nImpedimentos:\n- ' + result.errors.join('\n- '));
-  if (result.warnings.length) lines.push('\nAlertas para conferência:\n- ' + result.warnings.join('\n- '));
-  box.textContent = lines.join('\n');
+function discardPendingAttempt(record) {
+  if (!record) return;
+  record.pendingOfficialRegistration = false;
+  record.discardedAt = new Date().toISOString();
+  updateStoredRecord(record);
+  deleteOfficialFiles(record.recordId);
+  clearPendingPointer();
+  if (finalizedRecord?.recordId === record.recordId) finalizedRecord = null;
 }
 
 /**
- * Finaliza a PET como operação única: gera PDF, calcula hashes reais, gera o JSON exato e registra tudo.
- * O botão fica bloqueado durante o envio e, após sucesso, exige limpar/iniciar nova emissão.
+ * Finaliza a PET como operação única: gera PDF, calcula hashes reais, gera o JSON e registra.
+ * v1.2.0: uma tentativa pendente é reaproveitada se o formulário não mudou; se mudou, o usuário
+ * escolhe descartá-la antes de gerar outra — assim não surgem duas PETs para a mesma entrada.
  */
 async function finalizeRecord() {
   if (finalizationInProgress) return;
-  if (finalizedRecord?.serverRegistration) {
-    alert('Esta PET já foi finalizada. Para uma nova emissão, use “Limpar formulário” e confirme o início de uma nova PET.');
-    return;
-  }
-  const accessOk = await ensureOfficialAccessOrGuide('finalizar a PET oficial');
-  if (!accessOk) return;
-  const validation = validateCurrentForm();
-  showValidation(validation);
-  if (!validation.ok) { focusFirstFormIssue(validation); return alert('Existem impedimentos de segurança ou campos incompletos. Revise o item destacado antes de emitir.'); }
+  if (finalizedRecord?.serverRegistration) { showDone(finalizedRecord); return; }
 
-  const button = $('#finalizeBtn');
+  const validation = validateCurrentForm();
+  if (!validation.ok) {
+    validation.pendingSteps.forEach(p => triedSteps.add(p.step));
+    renderReview();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    return notify('Ainda há pendências. Toque nelas para corrigir.', 'bad');
+  }
+
+  const fingerprint = await formFingerprint();
+  if (finalizedRecord && finalizedRecord.pendingOfficialRegistration && finalizedRecord.pendingFormFingerprint && finalizedRecord.pendingFormFingerprint !== fingerprint) {
+    const ok = await askConfirm(`Existe uma PET gerada e ainda não registrada (${finalizedRecord.payload?.fields?.petNumero || finalizedRecord.recordId}), e o formulário foi alterado depois dela.\n\nDescartar essa tentativa e emitir uma nova PET com os dados atuais?`, { okLabel: 'Descartar e emitir nova', danger: true });
+    if (!ok) return;
+    discardPendingAttempt(finalizedRecord);
+  }
+
+  const accessOk = await ensureOfficialAccessOrGuide('finalizar a PET');
+  if (!accessOk) { updateDeviceChip(); return; }
+
   finalizationInProgress = true;
-  if (button) { button.disabled = true; button.textContent = 'Gerando e registrando...'; }
+  setBusy(true, 'Gerando PDF e arquivo de validação', 'Assinando com a chave deste aparelho e registrando no sistema. Não feche o aplicativo.');
   try {
-    // Reaproveita uma tentativa interrompida apenas como identidade/idempotência. A condição
-    // “pendente de registro” só será ativada depois que PDF + JSON existirem no IndexedDB.
     let record = normalizeFinalizationRecordStructure(finalizedRecord);
-    if (!record || record.serverRegistration) record = null;
+    if (record?.serverRegistration || record?.discardedAt) record = null;
+    if (record && record.output?.pdfHashSha256 && await hasCompletePendingArtifacts(record)) {
+      // Mesma PET, mesmos arquivos: apenas repete o envio.
+      const files = await readOfficialFiles(record);
+      await registerRecordOnServer(record, { pdfFile: files.pdfFile, jsonText: files.jsonText });
+      await completeRegistration(record, files.pdfFile, files.jsonText);
+      return;
+    }
     if (!record) {
       const payload = buildPayload();
       const payloadHash = await sha256Hex(payload);
@@ -1307,77 +1172,289 @@ async function finalizeRecord() {
         },
         pendingOfficialRegistration: false
       });
+      record.pendingFormFingerprint = fingerprint;
       finalizedRecord = record;
     }
-
     if (!latestPdfProof(record)) {
       const proof = await buildPdfGenerationProof(record);
-      normalizeFinalizationRecordStructure(record).integrity.pdfGenerationProofs.push(proof);
+      record.integrity.pdfGenerationProofs.push(proof);
       record.integrity.latestPdfProofHashSha256 = proof.pdfProofHashSha256;
     }
-    renderIntegrity(record);
-    renderPrintArea(record);
-
-    // Primeiro gera os bytes finais; só depois uma tentativa pode ser considerada reenviável.
     const pdfFile = await createPdfFile(record);
     const pdfHash = await sha256BlobHex(pdfFile);
     const dossier = buildRegisteredDossier(record, pdfHash, pdfFile.name);
     const jsonText = JSON.stringify(dossier, null, 2);
     const jsonHash = await sha256Hex(jsonText);
-    record.output = {
-      pdfFilename: pdfFile.name,
-      jsonFilename: jsonFilename(record),
-      pdfHashSha256: pdfHash,
-      jsonHashSha256: jsonHash,
-      generatedAt: new Date().toISOString()
-    };
+    record.output = { pdfFilename: pdfFile.name, jsonFilename: jsonFilename(record), pdfHashSha256: pdfHash, jsonHashSha256: jsonHash, generatedAt: new Date().toISOString() };
     record.pendingOfficialRegistration = true;
     await saveOfficialFiles(record, pdfFile, jsonText);
     updateStoredRecord(record);
+    writePendingPointer(record.recordId, record.pendingFormFingerprint || fingerprint);
 
     await registerRecordOnServer(record, { pdfHash, jsonHash, pdfFile, jsonText });
-    record.pendingOfficialRegistration = false;
-    try {
-      await saveOfficialFiles(record, pdfFile, jsonText);
-    } catch (localError) {
-      showStorageNotice('A PET foi aceita no servidor, mas o aparelho não conseguiu atualizar a cópia local. Compartilhe imediatamente o PDF e o arquivo de validação (JSON).', 'warn');
-      console.warn('Falha ao atualizar snapshot local após registro oficial', localError);
-    }
-    updateStoredRecord(record);
-    localStorage.removeItem(currentDraftKey());
-    renderIntegrity(record);
-    renderPrintArea(record);
-    $('#documentActions')?.classList.remove('hidden');
-    ['#printBtn','#sharePdfBtn','#exportBtn','#shareJsonBtn'].forEach(sel => { const b=$(sel); if (b) b.disabled=false; });
-    const retry = $('#registerServerBtn');
-    if (retry) { retry.disabled = true; retry.classList.add('hidden'); }
-    if (button) { button.disabled = true; button.textContent = 'PET finalizada'; }
-    updateFormAccessStatus('PET oficial gerada e registrada. Envie o PDF e o arquivo de validação (JSON) ao supervisor.', 'ok');
-    const historySaved = saveRecord(record);
-    if (!historySaved) showStorageNotice('A PET foi aceita no servidor, mas a referência não coube no histórico local. Compartilhe agora os dois arquivos com o supervisor.', 'warn');
-    alert('PET oficial concluída. Envie o PDF e o arquivo de validação da PET (JSON) ao supervisor.');
-    renderRecords();
+    await completeRegistration(record, pdfFile, jsonText);
   } catch (err) {
     const reusable = finalizedRecord && await hasCompletePendingArtifacts(finalizedRecord);
     if (finalizedRecord) {
       finalizedRecord.pendingOfficialRegistration = reusable;
       updateStoredRecord(finalizedRecord);
+      if (!reusable) clearPendingPointer();
     }
-    const retry = $('#registerServerBtn');
-    if (retry) {
-      retry.disabled = !reusable;
-      retry.classList.toggle('hidden', !reusable);
-    }
+    renderPendingAttempt();
     if (reusable) {
-      renderServerPanel('Os arquivos foram gerados, mas o envio ao servidor não terminou. Use “Repetir registro pendente”; a mesma PET será reutilizada.', 'bad');
-      alert('Os documentos foram gerados, mas o registro no servidor não foi concluído: ' + err.message + '\nUse “Repetir registro pendente”.');
-      if (button) { button.disabled = false; button.textContent = 'Tentar finalizar novamente'; }
+      renderServerPanel('Os arquivos foram gerados, mas o registro no sistema não terminou: ' + err.message, 'bad');
+      notify('A PET foi gerada, mas o envio ao sistema não terminou. Use “Repetir envio ao sistema” quando houver conexão; o mesmo número será usado.', 'bad', 9000);
     } else {
-      renderServerPanel('A geração foi interrompida antes de existir um conjunto completo de arquivos: ' + err.message, 'bad');
-      alert('Não foi possível concluir a emissão oficial: ' + err.message + '\nO formulário foi preservado. Corrija o problema e tente finalizar novamente.');
-      if (button) { button.disabled = false; button.textContent = 'Tentar finalizar novamente'; }
+      renderServerPanel('A emissão foi interrompida antes de gerar os arquivos: ' + err.message, 'bad');
+      notify('Não foi possível concluir a emissão: ' + err.message + '\nO formulário foi preservado.', 'bad', 9000);
     }
   } finally {
     finalizationInProgress = false;
+    setBusy(false);
   }
+}
+
+/** Depois que o servidor aceita: atualiza cópias locais, limpa rascunho e mostra a conclusão. */
+async function completeRegistration(record, pdfFile, jsonText) {
+  record.pendingOfficialRegistration = false;
+  try { await saveOfficialFiles(record, pdfFile, jsonText); }
+  catch (localError) {
+    showStorageNotice('A PET foi aceita no servidor, mas o aparelho não conseguiu atualizar a cópia local. Envie agora o PDF e o arquivo de validação.', 'warn');
+    console.warn('Falha ao atualizar snapshot local após registro oficial', localError);
+  }
+  const historySaved = saveRecord(record);
+  if (historySaved === false) showStorageNotice('A PET foi aceita no servidor, mas não coube no histórico deste aparelho. Envie agora os dois arquivos.', 'warn');
+  clearPendingPointer();
+  const draftKey = currentDraftKey();
+  if (draftKey) localStorage.removeItem(draftKey);
+  finalizedRecord = record;
+  $('#serverPanel')?.classList.add('hidden');
+  renderRecords();
+  showDone(record);
+}
+
+/** Tela de conclusão com número, hora e botões de envio dos dois arquivos. */
+function showDone(record) {
+  $('#doneNumero').textContent = record.payload?.fields?.petNumero || record.recordId;
+  const when = record.serverRegistration?.server_received_at || record.output?.generatedAt;
+  $('#doneHora').textContent = when ? `Registrada em ${formatDateTime(when)}` : '';
+  renderIntegrity(record);
+  showFormView('done');
+  window.scrollTo({ top: 0 });
+}
+
+/** Começa uma nova PET depois da conclusão (ou ao descartar o rascunho). */
+function startNewPet() {
+  const draftKey = currentDraftKey();
+  if (draftKey) localStorage.removeItem(draftKey);
+  clearWorkspaceMemory();
+  ventilationAdded = false;
+  refreshFormDerivedUi();
+  setDraftStatus('');
+  renderRecords();
+}
+
+/* =====================================================================
+ * RASCUNHO E ESTADO DERIVADO
+ * ===================================================================== */
+
+function setDraftStatus(time) {
+  const el = $('#draftStatus');
+  if (el) el.textContent = time ? `Rascunho salvo às ${time}` : 'O rascunho é salvo automaticamente';
+}
+
+/** Atualiza tudo o que depende dos valores do formulário (contadores, avisos, destaques). */
+function refreshFormDerivedUi() {
+  updateChecklistUi();
+  updateGasUi();
+  updateSupervisorAutoDisplay();
+  const consent = $('#petForm')?.elements.declaracaoCiencia;
+  $('#cienciaCard')?.classList.toggle('checked', !!consent?.checked);
+  if (triedSteps.has(currentFormStep)) refreshStepIssues();
+}
+
+/* =====================================================================
+ * EVENTOS
+ * ===================================================================== */
+
+function bindEvents() {
+  $$('[data-tab]').forEach(button => button.addEventListener('click', () => showTab(button.dataset.tab)));
+
+  // Login
+  $('#loginForm')?.addEventListener('submit', event => { event.preventDefault(); login().catch(err => notify('Erro no login: ' + err.message, 'bad')); });
+  $('#togglePasswordBtn')?.addEventListener('click', event => {
+    const input = $('#loginPassword');
+    const show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    event.currentTarget.textContent = show ? 'Ocultar' : 'Mostrar';
+    event.currentTarget.setAttribute('aria-pressed', String(show));
+  });
+  $('#setupAdminForm')?.addEventListener('submit', event => { event.preventDefault(); setupFirstAdmin().catch(err => notify('Erro ao criar administrador: ' + err.message, 'bad')); });
+
+  // Etapas
+  $('#formPrevBtn')?.addEventListener('click', () => showFormStep(currentFormStep - 1));
+  $('#formNextBtn')?.addEventListener('click', () => goToNextFormStep());
+  $('#reviewContent')?.addEventListener('click', event => { const step = event.target.closest('[data-go-step]')?.dataset.goStep; if (step) showFormStep(Number(step)); });
+  $('#reviewPending')?.addEventListener('click', event => {
+    const step = Number(event.target.closest('[data-go-step]')?.dataset.goStep);
+    if (!step) return;
+    triedSteps.add(step);
+    showFormStep(step);
+    const first = validateFormStep(step).issues[0];
+    if (first) setTimeout(() => focusIssue(first.target), 150);
+  });
+  $('#discardDraftBtn')?.addEventListener('click', () => $('#discardConfirm').classList.remove('hidden'));
+  $('#discardCancelBtn')?.addEventListener('click', () => $('#discardConfirm').classList.add('hidden'));
+  $('#discardConfirmBtn')?.addEventListener('click', () => {
+    if (finalizedRecord && !finalizedRecord.serverRegistration) discardPendingAttempt(finalizedRecord);
+    startNewPet();
+    notify('Rascunho descartado.', 'info', 2500);
+  });
+
+  // Checklist
+  $('#checklistGroups')?.addEventListener('change', event => {
+    const match = event.target.name?.match(/^check_(\d{2})$/);
+    if (!match) return;
+    updateNaJustificationVisibility(match[1]);
+    updateChecklistUi();
+    scrollToNextChecklistItem(match[1], event.target.value);
+  });
+
+  // Medições
+  $('#addVentBtn')?.addEventListener('click', () => { ventilationAdded = true; updateGasUi(); setTimeout(() => focusIssue($('#petForm').elements.gas_ventilacao_hora), 50); });
+  $('#removeVentBtn')?.addEventListener('click', removeVentilationTest);
+
+  // Equipe
+  $('#peopleList')?.addEventListener('click', event => { const id = event.target.closest('[data-person-open]')?.dataset.personOpen; if (id) openPerson(id); });
+  $('#addEntrante')?.addEventListener('click', () => addProfessional('entrante'));
+  $('#addVigia')?.addEventListener('click', () => addProfessional('vigia'));
+  $('#personBackBtn')?.addEventListener('click', closePerson);
+  $('#personDoneBtn')?.addEventListener('click', closePerson);
+  const personField = field => event => {
+    const person = people.find(p => p.id === openPersonId);
+    if (!person) return;
+    person[field] = event.target.value;
+    updateSupervisorAutoDisplay();
+    autoSaveDraftDebounced();
+  };
+  $('#personNome')?.addEventListener('input', personField('nome'));
+  $('#personMatricula')?.addEventListener('input', personField('matricula'));
+  $('#personPhotoInput')?.addEventListener('change', async event => {
+    const file = event.target.files?.[0];
+    await handlePersonPhoto(file);
+    event.target.value = '';
+  });
+  $('#personSignBtn')?.addEventListener('click', () => openSignature(openPersonId));
+  $('#personRemoveBtn')?.addEventListener('click', async () => {
+    const person = people.find(p => p.id === openPersonId);
+    if (!person) return;
+    const ok = await askConfirm(`Remover ${personLabel(person)}${person.nome ? ' (' + person.nome + ')' : ''} da equipe?`, { okLabel: 'Remover', danger: true });
+    if (!ok) return;
+    people = people.filter(p => p.id !== person.id);
+    reindexPeople();
+    openPersonId = null;
+    renderPeople();
+    showFormView('form');
+    autoSaveDraft();
+  });
+  setupSignaturePad();
+  $('#sigClearBtn')?.addEventListener('click', clearSignaturePad);
+  $('#sigCancelBtn')?.addEventListener('click', closeSignature);
+  $('#sigConfirmBtn')?.addEventListener('click', () => confirmSignature().catch(err => notify(err.message, 'bad')));
+
+  // Emissão e conclusão
+  $('#registerServerBtn')?.addEventListener('click', event => retryPendingRecordRegistration(finalizedRecord, event.currentTarget));
+  $('#sharePdfBtn')?.addEventListener('click', event => sharePdfRecord(finalizedRecord, event.currentTarget));
+  $('#shareJsonBtn')?.addEventListener('click', event => shareJsonRecord(finalizedRecord, event.currentTarget));
+  $('#printBtn')?.addEventListener('click', event => openOfficialPdf(finalizedRecord, event.currentTarget));
+  $('#exportBtn')?.addEventListener('click', async () => {
+    if (!finalizedRecord || !await ensureRecordReadyForOutput(finalizedRecord)) return;
+    const files = await readOfficialFiles(finalizedRecord);
+    if (files?.jsonText) downloadBlob(new Blob([files.jsonText], { type: 'application/json' }), files.jsonFilename || jsonFilename(finalizedRecord));
+  });
+  $('#newPetBtn')?.addEventListener('click', () => { startNewPet(); });
+
+  // Conta
+  $('#pwdToggleBtn')?.addEventListener('click', () => openPasswordPanel());
+  $('#changeOwnPasswordBtn')?.addEventListener('click', () => changeOwnPassword().catch(err => notify('Erro ao alterar senha: ' + err.message, 'bad')));
+  $('#logoutBtn')?.addEventListener('click', async () => {
+    const ok = await askConfirm('Sair do sistema neste aparelho? O rascunho continua salvo para a sua conta.', { okLabel: 'Sair' });
+    if (ok) logout();
+  });
+  $('#registerDeviceBtn')?.addEventListener('click', event => registerDevice(event.currentTarget).catch(err => notify('Erro ao solicitar autorização: ' + err.message, 'bad')));
+  $('#refreshDevicesBtn')?.addEventListener('click', () => refreshDevices().then(() => notify('Situação atualizada.', 'info', 2000)));
+  $('#exportPublicKey')?.addEventListener('click', exportPublicKey);
+  $('#resetKey')?.addEventListener('click', () => resetLocalDeviceProtection().catch(err => notify('Não foi possível apagar a proteção local: ' + err.message, 'bad')));
+
+  // Gestão
+  $('#newUserToggle')?.addEventListener('click', () => toggleNewUserPanel());
+  $('#createUserBtn')?.addEventListener('click', () => createUser().catch(err => notify('Erro ao cadastrar usuário: ' + err.message, 'bad')));
+  $('#saveUserEditBtn')?.addEventListener('click', () => saveUserEdit().catch(err => notify('Erro ao atualizar usuário: ' + err.message, 'bad')));
+  $('#confirmResetPasswordBtn')?.addEventListener('click', () => confirmResetPassword().catch(err => notify('Erro ao redefinir senha: ' + err.message, 'bad')));
+  $$('[data-close-dialog]').forEach(btn => btn.addEventListener('click', () => $('#' + btn.dataset.closeDialog)?.close()));
+  $('#usersList')?.addEventListener('click', event => {
+    const el = event.target.closest('[data-user-edit], [data-user-reset], [data-user-delete]');
+    if (!el) return;
+    if (el.dataset.userEdit) openEditUser(el.dataset.userEdit);
+    if (el.dataset.userReset) openResetPassword(el.dataset.userReset);
+    if (el.dataset.userDelete) deleteUser(el.dataset.userDelete).catch(err => notify('Erro ao excluir acesso: ' + err.message, 'bad'));
+  });
+  $('#devicesList')?.addEventListener('click', async event => {
+    const approve = event.target.closest('[data-device-approve]');
+    const revoke = event.target.closest('[data-device-revoke]');
+    if (approve) changeDeviceStatus(approve.dataset.deviceApprove, 'approve', approve).catch(err => notify(err.message, 'bad'));
+    if (revoke) {
+      const action = revoke.dataset.deviceAction || 'Revogar';
+      const ok = await askConfirm(action === 'Rejeitar' ? 'Rejeitar esta solicitação de aparelho?' : 'Revogar a autorização deste aparelho? Ele não poderá mais emitir PETs.', { okLabel: action, danger: true });
+      if (ok) changeDeviceStatus(revoke.dataset.deviceRevoke, 'revoke', revoke).catch(err => notify(err.message, 'bad'));
+    }
+  });
+  $('#verifyFilesBtn')?.addEventListener('click', () => verifyFiles());
+  $('#serverValidateBtn')?.addEventListener('click', () => validateHashOnServer());
+  $('#recordsList')?.addEventListener('click', handleRecordAction);
+
+  // Rascunho automático: qualquer alteração no formulário salva e atualiza a tela.
+  const onFormEdited = debounce(() => { autoSaveDraft(); }, 400);
+  $('#petForm')?.addEventListener('input', () => { refreshFormDerivedUi(); onFormEdited(); });
+  $('#petForm')?.addEventListener('change', () => { refreshFormDerivedUi(); onFormEdited(); });
+
+  // Ao sair do app ou trocar de aplicativo, grava na hora o que ainda estava esperando o atraso do rascunho.
+  window.addEventListener('pagehide', () => autoSaveDraft());
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') autoSaveDraft(); });
+
+  // Conexão
+  window.addEventListener('online', () => { setOffline(false); refreshMe(); });
+  window.addEventListener('offline', () => setOffline(true));
+}
+
+/** Salva o rascunho com pequeno atraso (digitação no editor da pessoa). */
+let autoSaveTimer = null;
+function autoSaveDraftDebounced() {
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(() => autoSaveDraft(), 400);
+}
+
+/**
+ * Alterna a aba visível.
+ * v1.2.0: abrir uma aba não recarrega mais o formulário (antes a aba Sistema fazia isso).
+ */
+function showTab(tabId) {
+  const state = authState || loadAuthState();
+  if (!state?.user) { renderAuthState(); return; }
+  const canVerify = ['admin', 'gestor', 'verificador'].includes(state.user.role);
+  if (tabId === 'manageTab' && !canVerify) tabId = 'formTab';
+  $$('.tab').forEach(t => t.classList.remove('active'));
+  const target = $('#' + tabId) || $('#formTab');
+  target.classList.add('active');
+  $$('#appTabs [data-tab]').forEach(button => {
+    const active = button.dataset.tab === target.id;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-current', active ? 'page' : 'false');
+  });
+  updateStepBar();
+  window.scrollTo({ top: 0 });
+  if (target.id === 'recordsTab') renderRecords();
+  if (target.id === 'accountTab') { renderAuthState(); refreshDevices(true); }
+  if (target.id === 'manageTab') { refreshDevices(true); if (['admin', 'gestor'].includes(state.user.role)) refreshUsers(); }
+  if (target.id === 'formTab' && currentFormStep === 6 && $('#doneView').classList.contains('hidden')) renderReview();
 }

@@ -1,259 +1,129 @@
-# PET-Digital NR-33 v1.1.6 — Cloudflare comentado
+# PET-Digital NR-33 v1.2.0 — Cloudflare comentado
 
+Permissão de Entrada e Trabalho em espaço confinado, digital, com assinatura, foto, geolocalização e validação por PDF + arquivo de validação (JSON).
 
+A v1.2.0 traz a **nova interface** aprovada no protótipo, corrige os problemas encontrados na leitura do código da v1.1.6 hotfix 2 e inclui um **kit de testes automáticos** que roda sem Cloudflare.
 
-## Hotfix 2 — checklist sem bloqueio por resposta
+> **Não há migration nova no D1.** Basta publicar o Worker e o frontend (ver “Instalação”).
 
-Esta revisão ajusta a regra operacional do checklist conforme os testes de campo:
+---
 
-- os 22 itens continuam obrigatórios;
-- cada item aceita **Sim**, **Não** ou **N/A** sem bloquear a emissão apenas por causa da alternativa escolhida;
-- respostas que mereçam atenção continuam aparecendo como **avisos**, para não esconder a condição registrada;
-- quando **N/A** for selecionado, a justificativa continua obrigatória, porém **não há quantidade mínima de caracteres**;
-- a mesma regra foi aplicada no frontend e no Worker, evitando divergência entre o celular e a validação do servidor;
-- o cache foi atualizado para `pet-digital-static-v1.1.6-hotfix2`.
+## 1. O que mudou na v1.2.0
 
-Não há migration nova do D1 para este hotfix.
+Detalhes em `docs/ALTERACOES_v120.md`. Resumo:
 
-> **Hotfix 1 — 25/08/2026:** restaurada a função `setDefaultDateTime()` no `app-core.js`.
-> O erro aparecia depois de um login válido porque o fluxo carregava o espaço de trabalho e chamava uma função que havia sido removida acidentalmente durante a modularização da v1.1.6. A data continua sendo obtida do relógio local do aparelho, não de UTC. O cache do Service Worker foi alterado para `pet-digital-static-v1.1.6-hotfix1` para forçar a atualização do JavaScript nos aparelhos.
+### Correções
 
+| Problema na v1.1.6 | Situação na v1.2.0 |
+|---|---|
+| A função que leva ao campo com erro (`focusFirstFormIssue`) não existia; o app parava com erro ao avançar com pendência. | Função recriada (`focusIssue`); o botão “Ir para o primeiro” leva ao campo. |
+| Depois de uma falha no envio, abrir a aba Sistema ou fazer login de novo esquecia a tentativa; ao finalizar outra vez surgia **outra PET com outro número**. | A tentativa pendente é guardada e recuperada (até depois de fechar o app). Finalizar de novo **reaproveita o mesmo número e os mesmos arquivos**. Se o formulário mudou, o app pergunta se deve descartar a tentativa antiga. |
+| Sem internet ao abrir o app, o usuário era desconectado. | Falta de internet não desconecta mais. Só uma recusa do servidor (sessão expirada/revogada) leva ao login, e o rascunho é mantido. |
+| A sessão acabava ao fechar o app. | A sessão fica guardada no aparelho até vencer no servidor (8 h). |
+| O PDF não mostrava justificativas de N/A, detector nem declaração de ciência. | Página 2 do PDF traz detector, justificativas de N/A (marcadas com `X*` no checklist) e a declaração de ciência com nome e hora. |
+| O PDF marcava “Fora dos limites” quando a medição era digitada com vírgula. | Vírgula e ponto aceitos no PDF, como já eram no Worker. |
+| Endereços de publicação de teste (`https://<id>.pet-digital.pages.dev`) não conseguiam falar com a API. | O Worker aceita esses endereços do mesmo projeto (pode ser desligado). |
+| `/db-test` era público. | Exige login de administrador. |
+| Documentação dizia que “Não”/N/A em item crítico bloqueava a emissão. | Documentação alinhada à regra atual. |
 
-Versão de correção e refinamento da experiência de emissão da PET Digital NR-33. Esta entrega mantém a arquitetura **Cloudflare Pages + Worker + D1**, sem armazenar PDF, JSON, fotos ou imagens de assinatura no D1.
+### Nova interface (protótipo aprovado)
 
-## Arquitetura
+- Cabeçalho compacto com selo da situação do aparelho; abas **Nova PET**, **Minhas PETs**, **Conta** e **Gestão**.
+- Barra fixa **Voltar / Próxima** no rodapé.
+- Campos ficam vermelhos **só depois** de tentar avançar, com resumo “Faltam N informações” e “Ir para o primeiro”.
+- Checklist agrupado por assunto, com contador, cores nas respostas e rolagem automática para o próximo item.
+- Medições com “Dentro/Fora do limite” ao lado de cada campo; teste após ventilação aparece sozinho quando o inicial sai do limite.
+- Equipe em lista compacta; editor por pessoa; câmera traseira; **assinatura em tela cheia** com “Confirmar assinatura”.
+- Etapa 6 virou **Revisão**, com “Corrigir” em cada bloco e itens NÃO/N/A em destaque.
+- Tela de conclusão com **Enviar PDF** e **Enviar arquivo de validação**.
+- Avisos na própria tela no lugar das janelas `alert/confirm` do navegador.
+- Rascunho automático com “Rascunho salvo às HH:MM”; “Descartar” pede confirmação.
+- A aba Conta mostra a versão do app (útil para relatar problemas).
 
-- **Cloudflare Pages:** interface do aplicativo.
-- **Cloudflare Worker:** autenticação, autorização, validação, registro e auditoria.
-- **Cloudflare D1:** usuários, sessões, dispositivos autorizados, hashes, participantes e auditoria.
-- **Dispositivo do usuário:** rascunho, chave privada não exportável e cópias temporárias do PDF/arquivo de validação (JSON).
+### Regra do checklist (inalterada desde o hotfix 2)
 
-URLs configuradas nesta versão:
+- Os 22 itens são obrigatórios.
+- **Sim**, **Não** e **N/A** são aceitos e **nenhuma resposta bloqueia a emissão** por si só.
+- **N/A exige justificativa**, sem mínimo de caracteres.
+- Na revisão, itens NÃO e N/A aparecem em destaque para conferência.
+- Continuam bloqueando: medições fora do limite (sem teste após ventilação seguro), detector com calibração vencida, equipe incompleta, falta de foto/assinatura e falta da declaração de ciência.
 
-- API: `https://pet-digital-api.nicholas-dmae.workers.dev`
-- Frontend: `https://pet-digital.pages.dev`
+---
 
-> O D1 não guarda os arquivos finais. Durante o registro/validação, o Worker recebe temporariamente PDF e JSON, recalcula os hashes e grava somente hashes/metadados necessários à prova e auditoria.
+## 2. Arquitetura (sem mudança)
 
-## Alterações principais da v1.1.6
+- **Cloudflare Pages:** interface (`frontend/`).
+- **Cloudflare Worker:** autenticação, autorização, validação, registro e auditoria (`worker/src/index.js`).
+- **Cloudflare D1:** usuários, sessões, aparelhos autorizados, hashes, participantes e auditoria.
+- **Aparelho do usuário:** rascunho, chave privada não exportável, sessão e cópias temporárias do PDF/JSON.
 
-### 1. Correção do erro de finalização `pdfGenerationProofs.push`
+O D1 não guarda PDF, JSON, fotos ou assinaturas: só hashes e metadados.
 
-Foi corrigido o erro observado no celular:
+---
 
-`Cannot read properties of undefined (reading 'push')`
+## 3. Instalação
 
-Agora toda tentativa reaproveitada é normalizada antes do uso. O array `integrity.pdfGenerationProofs` é criado quando estiver ausente, sem inventar hashes ou assinaturas.
+1. **D1:** nada a fazer (a v1.2.0 usa as mesmas tabelas da v1.1.5/v1.1.6).
+2. **Worker:** substitua o código por `worker-pet-digital-api-v1.2.0.js` (ou `worker/src/index.js`) e publique.
+   - Opcional: variável `CORS_ALLOW_PREVIEWS = "false"` bloqueia os endereços de publicação de teste do Pages. Sem ela, ficam liberados.
+   - Confira `/health`: deve mostrar `"version": "1.2.0"`.
+3. **Pages:** publique **todo** o conteúdo de `frontend/`.
+4. Reabra o app no celular. O cache novo (`pet-digital-static-v1.2.0`) substitui o antigo. Se aparecer “Nova versão disponível”, toque em **Atualizar agora**.
 
-Também foi corrigido o estado de **registro pendente**:
+Passo a passo completo e roteiro de homologação: `docs/INSTALACAO_E_TESTE.md`.
 
-- uma PET só é marcada como pendente depois de PDF + JSON existirem de fato;
-- o botão **Repetir envio pendente** só aparece quando os dois arquivos e seus hashes estão disponíveis no IndexedDB;
-- se a geração falhar antes disso, o formulário é preservado e o usuário deve apenas finalizar novamente.
+> Usuários já logados na v1.1.6 precisarão entrar de novo uma vez (a sessão passou a ser guardada em outro lugar). Rascunhos são mantidos.
 
-### 2. Checklist: resposta obrigatória, sem forçar “Sim”
+---
 
-Todos os 22 itens continuam obrigatórios, porém o usuário pode registrar a condição real:
+## 4. Como testar (novo)
 
-- **Sim**;
-- **Não**;
-- **N/A**.
+Guia completo: `docs/COMO_TESTAR.md`. Resumo:
 
-O aplicativo não altera a resposta do usuário. A regra é separar **registro da condição** de **autorização da entrada**:
+1. **Testes automáticos** (antes de publicar qualquer versão):
+   ```bash
+   cd testes
+   npm install            # instala o Playwright (uma vez)
+   npx playwright install chromium   # baixa o navegador de teste (uma vez)
+   npm test               # API + navegador em tamanho de celular
+   ```
+2. **Servidor local** para testar à mão, sem Cloudflare: `node testes/servidor-local.mjs` e abra `http://localhost:8788`.
+3. **Ambiente de homologação** na Cloudflare (Worker + D1 separados), para testar no celular sem tocar a produção.
+4. **Roteiro de campo** e **modelo de relato de problema** em `docs/COMO_TESTAR.md`.
 
-- respostas inseguras são aceitas durante o preenchimento;
-- ao avançar, o usuário recebe aviso quando aplicável;
-- na emissão oficial, condições impeditivas bloqueiam a PET;
-- todo N/A exige justificativa;
-- N/A em item crítico pode ser registrado, mas impede a emissão até revisão.
+---
 
-As mesmas regras de segurança continuam sendo repetidas no Worker para não depender somente do navegador.
-
-### 3. Validação por etapa
-
-O formulário passou a validar cada etapa ao clicar em **Próxima etapa**.
-
-Fluxo:
-
-1. Identificação;
-2. Checklist;
-3. Atmosfera;
-4. Equipe;
-5. Ciência;
-6. Finalização.
-
-Quando há erro:
-
-- a etapa não avança;
-- a mensagem mostra o que deve ser corrigido;
-- o aplicativo leva o usuário ao primeiro campo/bloco relacionado ao erro.
-
-A validação completa é repetida antes da emissão oficial.
-
-### 4. Navegação móvel mais compacta
-
-Os seis botões fixos de etapa foram removidos da área principal. A navegação utiliza:
-
-- nome da etapa atual;
-- barra de progresso;
-- contador `etapa / total`;
-- botões **Voltar** e **Próxima etapa**.
-
-Isso reduz a área ocupada no celular.
-
-### 5. Checklist otimizado para celular
-
-No desktop permanece a tabela tradicional. Em telas pequenas, cada item vira um cartão com três opções grandes:
-
-`Sim | Não | N/A`
-
-A justificativa de N/A aparece no próprio cartão. Os controles móvel e desktop são sincronizados e geram o mesmo payload.
-
-### 6. Supervisor informado uma única vez
-
-O campo “Supervisor de entrada” deixou de ser digitado na Identificação.
-
-O nome e a matrícula são obtidos automaticamente do participante com função **Supervisor de Entrada** cadastrado na etapa **Equipe**. Esses dados são copiados para o payload/PDF na finalização.
-
-Isso elimina divergência entre dois campos preenchidos manualmente.
-
-### 7. Tela de login simplificada
-
-O acesso diário recebeu prioridade visual. A criação do primeiro administrador ficou recolhida em:
-
-**Configuração inicial do sistema**
-
-Ela continua disponível para implantação, mas não ocupa metade da tela de login.
-
-O botão **Entrar no sistema** fica desabilitado e mostra `Entrando...` enquanto aguarda a API. Isso evita cliques repetidos consumindo tentativas do limitador de login.
-
-### 8. Aba ativa destacada
-
-O menu superior destaca visualmente a área aberta e usa `aria-current="page"` para tecnologias assistivas.
-
-### 9. Menos botões na finalização
-
-Na etapa final ficam em destaque apenas as ações principais. Depois da emissão:
-
-- **Compartilhar PDF**;
-- **Compartilhar arquivo de validação (JSON)**.
-
-Ações secundárias ficam recolhidas em **Outras opções**.
-
-### 10. Terminologia de produção
-
-Na interface, “Comprovante técnico” foi substituído por:
-
-**Arquivo de validação da PET (JSON)**
-
-Termos criptográficos detalhados continuam concentrados em áreas de **Detalhes técnicos**.
-
-### 11. PDF sem bibliotecas externas
-
-A v1.1.6 remove `jsPDF`, `html2canvas` e qualquer script de CDN.
-
-O PDF é produzido localmente com APIs nativas do navegador:
-
-1. o aplicativo desenha as páginas em `Canvas 2D`;
-2. converte cada página para JPEG;
-3. monta localmente a estrutura PDF 1.4;
-4. calcula o SHA-256 dos bytes finais;
-5. gera o JSON correspondente;
-6. registra os dois hashes no Worker.
-
-Consequências:
-
-- nenhuma biblioteca de PDF é baixada de terceiros durante o uso;
-- `script-src` da CSP pode permanecer somente `'self'`;
-- o PDF continua contendo dados, checklist, medições, fotos, assinaturas e elementos de integridade.
-
-### 12. Segurança e endurecimentos da v1.1.5 mantidos
-
-Continuam ativos:
-
-- limite de tentativas de login por matrícula e IP;
-- hierarquia de administração de dispositivos;
-- limites de participantes e tamanho de requisição;
-- verificação de números negativos nas medições;
-- separação dos dados locais por usuário;
-- Service Worker limitado a arquivos estáticos;
-- registro do principal + participantes em `DB.batch()` e conferência posterior;
-- idempotência e conflito HTTP 409;
-- validação oficial por PDF + JSON + registro do D1 + chave autorizada.
-
-## D1 / migrations
-
-### Atualizando da v1.1.5 para a v1.1.6
-
-**Não há nova migration do D1.**
-
-Se `0004_hardening_v115.sql` já foi executada, não rode novamente.
-
-### Instalação nova ou atualização de versão anterior à v1.1.5
-
-Confira se as migrations existentes foram aplicadas na ordem necessária:
-
-- `0001_schema_v110.sql`
-- `0002_roles_v110.sql` — somente para base que ainda possua perfis antigos;
-- `0003_security_v114.sql`
-- `0004_hardening_v115.sql`
-
-## Instalação resumida da v1.1.6
-
-1. **Não altere o D1** se a v1.1.5 já estava funcionando.
-2. No Worker `pet-digital-api`, substitua o código pelo arquivo `worker-pet-digital-api-v1.1.6.js` ou por `worker/src/index.js`.
-3. Faça deploy do Worker.
-4. Teste:
-   - `/health`
-   - `/db-test`
-5. Publique **todo o conteúdo** de `frontend/` no Cloudflare Pages.
-6. Reabra o aplicativo. O Service Worker `pet-digital-static-v1.1.6` elimina caches antigos e atualiza os arquivos estáticos.
-7. Faça uma PET fictícia completa antes de liberar a versão para uso real.
-
-## Estrutura
+## 5. Estrutura
 
 ```text
-pet-digital-v1.1.6/
-├── frontend/
-│   ├── index.html
-│   ├── app-core.js
-│   ├── app-system.js
-│   ├── app-form.js
-│   ├── app-output.js
-│   ├── styles.css
-│   ├── sw.js
-│   ├── _headers
-│   ├── manifest.json
-│   └── logo-dmae-2026.png
-├── worker/
-│   ├── src/index.js
-│   ├── wrangler.toml
-│   └── package.json
-├── migrations/
-├── docs/
-└── worker-pet-digital-api-v1.1.6.js
+pet-digital-v1.2.0/
+├── frontend/                 → publicar no Cloudflare Pages
+│   ├── index.html            telas
+│   ├── styles.css            aparência
+│   ├── app-core.js           constantes, armazenamento, criptografia, avisos
+│   ├── app-system.js         sessão, conta, aparelho, gestão, API
+│   ├── app-form.js           etapas, checklist, medições, equipe, revisão, emissão
+│   ├── app-output.js         PDF, arquivo de validação, Minhas PETs, validação, início
+│   ├── sw.js, _headers, manifest.json, logo-dmae-2026.png
+├── worker/                   → código do Worker (src/index.js, wrangler.toml)
+├── worker-pet-digital-api-v1.2.0.js   cópia do Worker para colar no painel
+├── migrations/               esquema do D1 (sem novidade nesta versão)
+├── testes/                   kit de testes automáticos e servidor local
+└── docs/                     alterações, instalação, testes, rotas e mapa do código
 ```
 
-## Arquivos importantes para revisão do código
+Todo o código segue comentado no padrão **O quê / Como / Quando**. Mapa: `docs/MAPA_DO_CODIGO_v120_COMENTADO.md`.
 
-- `frontend/app-core.js`: constantes, armazenamento, WebCrypto, IndexedDB e utilitários.
-- `frontend/app-system.js`: login, usuários, dispositivos, sessão e chamadas à API.
-- `frontend/app-form.js`: checklist, medições, participantes, assinatura, etapas e finalização.
-- `frontend/app-output.js`: criação do PDF, compartilhamento, histórico e validação.
-- `worker/src/index.js`: autenticação, autorização, validação independente e D1.
+---
 
-Todos continuam comentados no padrão **O quê / Como / Quando**.
+## 6. Pontos que ainda exigem homologação em campo
 
-## Pontos que ainda exigem homologação em campo
+- Câmera e assinatura nos modelos de celular usados pela equipe (Android e iPhone).
+- Geolocalização permitida e negada.
+- Rede instável durante a finalização (o envio deve ficar pendente e ser repetido sem gerar outra PET).
+- Compartilhamento do PDF e do JSON por WhatsApp, e-mail e aplicativo corporativo.
+- PDFs com 1, 5, 10 e 20 participantes e com muitos itens N/A.
 
-Antes de considerar a versão definitiva:
+> Os arquivos no aparelho são temporários. Depois da emissão, o PDF e o arquivo de validação devem ser enviados ao supervisor responsável.
 
-- testar câmera em Android/iPhone utilizados pela equipe;
-- testar assinatura com dedo em diferentes tamanhos de tela;
-- testar geolocalização permitida/negada;
-- testar rede instável durante a finalização e o botão de repetição pendente;
-- testar compartilhamento do PDF e JSON por WhatsApp/e-mail/app corporativo;
-- validar visualmente PDFs com 1, 5, 10 e 20 participantes;
-- confirmar com Segurança do Trabalho quais respostas “Não” e N/A devem permanecer impeditivas.
-
-> Os arquivos do dispositivo são temporários. Após a emissão oficial, PDF e Arquivo de validação da PET (JSON) devem ser encaminhados imediatamente ao supervisor responsável.
+Histórico de versões anteriores: `docs/ALTERACOES_v114.md`, `v115` e `v116`.

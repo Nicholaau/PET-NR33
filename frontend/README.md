@@ -1,42 +1,33 @@
-# Frontend — PET-Digital NR-33 v1.1.6
+# Frontend — PET-Digital NR-33 v1.2.0
 
 Publique **todos os arquivos desta pasta** no Cloudflare Pages, inclusive `_headers`.
 
 ## Ordem dos scripts
 
-O `index.html` carrega apenas arquivos locais:
+O `index.html` carrega apenas arquivos locais, nesta ordem:
 
-1. `app-core.js`;
-2. `app-system.js`;
-3. `app-form.js`;
-4. `app-output.js`.
+1. `app-core.js` — constantes, armazenamento, criptografia, avisos na tela, tentativa pendente;
+2. `app-system.js` — sessão, conta, aparelho, gestão e chamadas da API;
+3. `app-form.js` — etapas, checklist, medições, equipe, assinatura, revisão e emissão;
+4. `app-output.js` — PDF, arquivo de validação, Minhas PETs, validação e inicialização.
 
-Não existem bibliotecas externas de PDF nesta versão.
+Não há bibliotecas externas.
 
-## Dados locais
+## Dados no aparelho
 
-- rascunho e referências de registros são separados por usuário;
-- `localStorage` guarda no máximo 30 referências compactas;
-- PDF, arquivo de validação (JSON) e snapshot completo ficam temporariamente no IndexedDB;
-- chave privada não exportável fica no IndexedDB criptográfico;
-- falhas de cota local são mostradas ao usuário;
-- logout limpa o estado em memória.
+- **Sessão:** `localStorage`, até a validade informada pelo servidor (8 h).
+- **Rascunho:** `localStorage`, separado por usuário; salvo a cada alteração e ao sair do app.
+- **Tentativa pendente:** ponteiro em `localStorage` (`petDigitalPendingAttemptV1:<usuário>`), para reenviar sem duplicar.
+- **Minhas PETs:** até 30 referências compactas em `localStorage`.
+- **PDF, arquivo de validação e cópia completa da PET:** IndexedDB, temporariamente.
+- **Chave de assinatura:** IndexedDB, não exportável.
 
-## PDF
+## Segurança
 
-O PDF é desenhado com Canvas 2D e montado localmente como PDF 1.4. Nenhum script de CDN é necessário.
+- `_headers` aplica CSP e demais cabeçalhos; `script-src` e `style-src` aceitam só `'self'` (por isso não há estilo inline).
+- O Service Worker guarda apenas arquivos estáticos; respostas da API nunca ficam offline.
+- Cache atual: `pet-digital-static-v1.2.0`.
 
-## Segurança do frontend
+## Regra do checklist
 
-- `_headers` aplica CSP e demais cabeçalhos no Pages;
-- `script-src` aceita somente `'self'`;
-- Service Worker guarda apenas arquivos estáticos do próprio Pages;
-- respostas da API e requisições com `Authorization` nunca são armazenadas offline.
-
-## Hotfix 1
-
-Restaurada `setDefaultDateTime()` em `app-core.js` e atualizado o cache do Service Worker para evitar que aparelhos continuem carregando a versão quebrada.
-
-
-## Hotfix 2
-O checklist exige resposta em todos os itens, mas Sim/Não/N/A não bloqueiam a emissão por si só. N/A exige justificativa sem comprimento mínimo.
+Os 22 itens exigem resposta. Sim, Não e N/A não bloqueiam a emissão por si só. N/A exige justificativa, sem mínimo de caracteres.

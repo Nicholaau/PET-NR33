@@ -1,485 +1,504 @@
 <!doctype html>
-<!-- PET-Digital NR-33 v1.1.6 comentado: estrutura visual do app. O comportamento é dividido em quatro arquivos JavaScript; a API fica no Worker. -->
+<!--
+  PET-Digital NR-33 v1.2.0 — estrutura visual do aplicativo.
+  O quê: telas de login, preenchimento em etapas, equipe, revisão, conclusão, Minhas PETs, Conta e Gestão.
+  Como: o comportamento fica em quatro arquivos JavaScript (núcleo, sistema, formulário e saída); a API fica no Worker.
+  Quando: carregado pelo Cloudflare Pages e mantido offline pelo Service Worker.
+  Observação: a CSP não permite estilos inline; toda a aparência está em styles.css.
+  A proteção contra exibição em outros sites (frame-ancestors) fica no arquivo _headers.
+-->
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0b3a66" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://pet-digital-api.nicholas-dmae.workers.dev; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; worker-src 'self' blob:; manifest-src 'self'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://pet-digital-api.nicholas-dmae.workers.dev; object-src 'none'; base-uri 'self'; form-action 'self'; worker-src 'self' blob:; manifest-src 'self'" />
   <title>PET Digital NR-33 — DMAE</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <!-- Cabeçalho fixo: identifica o app e contém a navegação entre abas. -->
-  <header id="appTopbar" class="topbar no-print hidden">
-    <div>
-      <strong>PET Digital NR-33</strong>
-      <span>DMAE — Permissão de Entrada e Trabalho para Espaço Confinado</span>
-    </div>
-    <nav>
-      <button type="button" class="ghost active" data-tab="formTab" aria-current="page">Preencher</button>
-      <button type="button" class="ghost" data-tab="systemTab">Sistema</button>
-      <button type="button" class="ghost" data-tab="recordsTab">Registros</button>
-      <button type="button" class="ghost" data-tab="verifyTab">Validar</button>
-    </nav>
-  </header>
 
-  <!-- Banner controlado pelo Service Worker: aparece quando há nova versão para aplicar. -->
-  <div id="updateBanner" class="update-banner no-print hidden">
-    Nova versão disponível. Salve o que estiver preenchendo antes de atualizar.
-    <button type="button" id="applyUpdate">Atualizar agora</button>
+  <!-- ===================== LOGIN ===================== -->
+  <main id="loginScreen" class="login-screen">
+    <div class="login-brand">
+      <img src="logo-dmae-2026.png" alt="DMAE — Prefeitura de Uberlândia" class="login-logo" />
+      <h1>PET Digital NR-33</h1>
+      <p>Permissão de Entrada e Trabalho em Espaço Confinado</p>
+    </div>
+
+    <form id="loginForm" class="card login-card" novalidate>
+      <label class="field">Matrícula
+        <input id="loginMatricula" inputmode="numeric" autocomplete="username" placeholder="Sua matrícula" />
+      </label>
+      <label class="field">Senha
+        <span class="password-wrap">
+          <input id="loginPassword" type="password" autocomplete="current-password" placeholder="Sua senha" />
+          <button type="button" id="togglePasswordBtn" class="password-toggle" aria-controls="loginPassword" aria-pressed="false">Mostrar</button>
+        </span>
+      </label>
+      <button type="submit" id="loginBtn" class="btn primary block">Entrar</button>
+      <p class="hint center">Esqueceu a senha? Procure o gestor do seu setor.</p>
+    </form>
+    <p class="hint center">Após o login, a sessão fica ativa neste aparelho por até 8 horas, inclusive sem internet.</p>
+
+    <form id="setupAdminForm" class="setup-panel" novalidate>
+      <details>
+        <summary>Configuração inicial do sistema</summary>
+        <div class="stack">
+          <p class="hint">Use somente uma vez, durante a implantação, para criar o primeiro administrador.</p>
+          <label class="field">Token de instalação<input id="setupToken" type="password" autocomplete="off" /></label>
+          <label class="field">Nome<input id="setupName" autocomplete="off" /></label>
+          <label class="field">Matrícula<input id="setupMatricula" autocomplete="off" /></label>
+          <label class="field">E-mail<input id="setupEmail" type="email" autocomplete="off" /></label>
+          <label class="field">Senha inicial<input id="setupPassword" type="password" autocomplete="new-password" /></label>
+          <button type="submit" id="setupAdminBtn" class="btn secondary block">Criar primeiro administrador</button>
+        </div>
+      </details>
+    </form>
+  </main>
+
+  <!-- ===================== CABEÇALHO E ABAS ===================== -->
+  <header id="appTopbar" class="topbar hidden">
+    <img src="logo-dmae-2026.png" alt="DMAE — Prefeitura de Uberlândia" class="topbar-logo" />
+    <button type="button" id="deviceChip" class="chip chip-neutral" data-tab="accountTab">
+      <span class="chip-dot" aria-hidden="true"></span><span id="deviceChipText">Verificando aparelho</span>
+    </button>
+  </header>
+  <nav id="appTabs" class="tabs hidden" aria-label="Seções do aplicativo">
+    <button type="button" class="tab-btn active" data-tab="formTab" aria-current="page">Nova PET</button>
+    <button type="button" class="tab-btn" data-tab="recordsTab">Minhas PETs</button>
+    <button type="button" class="tab-btn" data-tab="accountTab">Conta</button>
+    <button type="button" class="tab-btn hidden" id="manageTabBtn" data-tab="manageTab">Gestão<span id="manageBadge" class="badge hidden">0</span></button>
+  </nav>
+  <div id="offlineBanner" class="banner banner-warn hidden" role="status">Sem conexão. O preenchimento continua; a emissão oficial exige internet.</div>
+  <div id="updateBanner" class="banner banner-info hidden" role="status">
+    <span>Nova versão disponível.</span>
+    <button type="button" id="applyUpdate" class="btn small primary">Atualizar agora</button>
   </div>
 
-  <!-- Tela inicial de acesso: aparece antes do formulário para manter o fluxo mais tradicional.
-       O quê: solicita credenciais antes de liberar o preenchimento oficial.
-       Como: usa os mesmos endpoints do Worker já existentes.
-       Quando: exibida ao abrir o app sem sessão válida ou após sair. -->
-  <main id="loginScreen" class="login-screen no-print">
-    <section class="login-card">
-      <div class="login-brand">
-        <img src="logo-dmae-2026.png" alt="DMAE — Prefeitura de Uberlândia" class="login-logo" />
-        <h1>PET Digital NR-33</h1>
-        <p>Permissão de Entrada e Trabalho para Espaço Confinado</p>
-      </div>
+  <main id="appShell" class="app-shell hidden">
 
-      <div id="authStatus" class="validation-box warn">Informe suas credenciais para acessar o sistema.</div>
-
-      <div class="login-grid">
-        <form id="loginForm" class="login-panel login-main-panel">
-          <h2>Entrar</h2>
-          <label>Matrícula
-            <input id="loginMatricula" autocomplete="username" placeholder="Matrícula" />
-          </label>
-          <label>Senha
-            <input id="loginPassword" type="password" autocomplete="current-password" placeholder="Senha" />
-          </label>
-          <div class="actions no-print">
-            <button type="submit" id="loginBtn">Entrar no sistema</button>
-          </div>
-          <p class="hint">Após o login, o formulário da PET e os registros salvos neste dispositivo serão liberados.</p>
-        </form>
-
-        <form id="setupAdminForm" class="setup-panel">
-          <details>
-            <summary>Configuração inicial do sistema</summary>
-            <div class="setup-panel-content">
-            <p class="hint">Use somente uma vez, durante a implantação, para criar o primeiro administrador.</p>
-            <label>Token de instalação
-              <input id="setupToken" type="password" placeholder="Token de instalação" />
-            </label>
-            <label>Nome
-              <input id="setupName" placeholder="Nome do administrador" />
-            </label>
-            <label>Matrícula
-              <input id="setupMatricula" placeholder="Matrícula" />
-            </label>
-            <label>E-mail
-              <input id="setupEmail" type="email" placeholder="email@dmae..." />
-            </label>
-            <label>Senha inicial
-              <input id="setupPassword" type="password" placeholder="Senha forte" />
-            </label>
-            <div class="actions no-print">
-              <button type="submit" id="setupAdminBtn" class="secondary">Criar primeiro administrador</button>
-            </div>
-            </div>
-          </details>
-        </form>
-      </div>
-    </section>
-  </main>
-
-  <main id="appShell" class="container app-shell hidden">
-    <!-- Aba principal: formulário completo da PET, validação, finalização e impressão. -->
+    <!-- ===================== NOVA PET ===================== -->
     <section id="formTab" class="tab active">
-      <form id="petForm" autocomplete="off">
-        <!-- Bloco visual de identificação institucional e título do documento. -->
-        <section class="card hero">
-          <div class="brand-box brand-logo-box">
-            <img src="logo-dmae-2026.png" alt="DMAE — Prefeitura de Uberlândia" class="brand-logo" />
-          </div>
-          <div>
-            <h1>PET — Permissão de Entrada e Trabalho</h1>
-            <p>Espaço Confinado • NBR 14787 / NR-33 • Revisão 00/2025 • Modelo 01/2025</p>
-          </div>
-        </section>
 
-        <!-- Bloco de acesso: mantém a experiência guiada. Após o login, o sistema orienta sobre a autorização do dispositivo antes de finalizar/gerar os documentos oficiais. -->
-        <section class="card auth-gate-card no-print">
-          <h2>Acesso para emissão oficial</h2>
-          <div id="formAuthGate" class="validation-box warn">Verificando acesso...</div>
-          <div class="actions">
-            <button type="button" class="secondary" data-tab="systemTab">Ir para o sistema/dispositivo</button>
+      <div id="formView">
+        <div class="card step-header">
+          <div class="step-header-top">
+            <h2 id="stepTitle">Identificação</h2>
+            <span id="stepCounter" class="muted">Etapa 1 de 6</span>
           </div>
-        </section>
-
-        <nav class="form-wizard no-print" aria-label="Etapas do preenchimento">
-          <div class="form-progress-head">
-            <strong id="formProgressLabel">Etapa 1 de 6: Identificação</strong>
-            <progress id="formProgressBar" max="6" value="1">1 de 6</progress>
+          <div id="stepSegments" class="segments" aria-hidden="true">
+            <span></span><span></span><span></span><span></span><span></span><span></span>
           </div>
-          <div id="stepValidationBox" class="step-validation hidden" role="status" aria-live="polite"></div>
-          <div class="form-step-nav">
-            <button type="button" id="formPrevBtn" class="ghost">Voltar</button>
-            <span id="formStepCounter" class="form-step-counter" aria-hidden="true">1 / 6</span>
-            <button type="button" id="formNextBtn" class="secondary">Próxima etapa</button>
+          <div class="step-header-bottom">
+            <span id="draftStatus" class="muted small-text">O rascunho é salvo automaticamente</span>
+            <button type="button" id="discardDraftBtn" class="link danger-text">Descartar</button>
           </div>
-        </nav>
-
-        <div id="storageNotice" class="validation-box warn hidden no-print" role="status" aria-live="polite"></div>
-
-        <!-- Seção 1: dados gerais que serão coletados para o payload assinado. -->
-        <section class="card" data-form-step="1">
-          <h2>1. Identificação da PET</h2>
-          <div class="grid cols-2">
-            <label>Nome da unidade
-              <input required name="unidade" placeholder="Ex.: DMAE / Núcleo / Setor" />
-            </label>
-            <label>Data
-              <input required type="date" name="data" />
-            </label>
-          </div>
-          <p class="hint">O número da PET será gerado automaticamente na finalização do registro.</p>
-          <div class="grid cols-3">
-            <label>Local do espaço confinado
-              <input required name="local" placeholder="Endereço, PV, reservatório, elevatória..." />
-            </label>
-            <label>Hora da emissão
-              <input required type="time" name="horaEmissao" />
-            </label>
-            <label>Hora do término previsto
-              <input required type="time" name="horaTermino" />
-            </label>
-          </div>
-          <label>Trabalho a ser realizado
-            <textarea required name="trabalho" rows="3" placeholder="Descreva de forma objetiva o serviço autorizado"></textarea>
-          </label>
-          <div class="grid cols-2">
-            <div class="auto-field" aria-live="polite">
-              <strong>Supervisor de entrada</strong>
-              <span id="supervisorAutoLabel">Será preenchido automaticamente com o supervisor informado na etapa “Equipe”.</span>
+          <div id="discardConfirm" class="inline-confirm hidden">
+            <p>Apagar tudo o que foi preenchido nesta PET?</p>
+            <div class="two-cols">
+              <button type="button" id="discardCancelBtn" class="btn secondary">Cancelar</button>
+              <button type="button" id="discardConfirmBtn" class="btn danger">Descartar</button>
             </div>
-            <fieldset class="inline-fieldset">
-              <legend>Equipe de salvamento</legend>
-              <label><input type="radio" name="equipeSalvamento" value="Própria" required /> Própria</label>
-              <label><input type="radio" name="equipeSalvamento" value="Corpo de Bombeiro" /> Corpo de Bombeiro</label>
-              <label><input type="radio" name="equipeSalvamento" value="Outra" /> Outra</label>
-              <input name="telefoneSalvamento" placeholder="Telefone / acionamento" value="193" />
-            </fieldset>
           </div>
-          <div class="grid cols-2">
-            <label>Identificador do equipamento detector
-              <input required name="detectorId" placeholder="Nº de série / patrimônio" />
-            </label>
-            <label>Validade/calibração do detector
-              <input required type="date" name="detectorCalibracao" />
-            </label>
-          </div>
-          <div class="actions no-print">
-            <button type="button" id="saveDraft" class="secondary">Salvar rascunho</button>
-            <button type="button" id="clearDraft" class="danger ghost">Limpar formulário</button>
-          </div>
-        </section>
+        </div>
 
-        <!-- Seção 2: checklist dinâmico renderizado pelo módulo de formulário a partir de checklistItems. -->
-        <section class="card" data-form-step="2">
-          <h2>2. Itens a serem verificados antes da emissão da PET</h2>
-          <p class="hint">Todos os 22 itens devem receber uma resposta. Selecione Sim, Não ou N/A conforme a condição realmente verificada. Nenhuma das três alternativas bloqueia o preenchimento ou a emissão por si só. Quando selecionar N/A, informe apenas uma justificativa objetiva, sem quantidade mínima de caracteres.</p>
-          <div id="checklistCards" class="checklist-cards" aria-label="Checklist de segurança"></div>
-          <div class="table-wrap checklist-desktop-wrap">
-            <table id="checklistTable" class="checklist-table">
-              <thead>
-                <tr><th>Nº</th><th>Item</th><th>Sim</th><th>Não</th><th>N/A</th></tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </section>
+        <div id="stepErrorBox" class="alert alert-bad hidden" role="alert">
+          <strong id="stepErrorTitle"></strong>
+          <ul id="stepErrorList"></ul>
+          <button type="button" id="stepErrorGo" class="link">Ir para o primeiro</button>
+        </div>
+        <div id="stepWarnBox" class="alert alert-warn hidden" role="status"></div>
+        <div id="storageNotice" class="alert alert-warn hidden" role="status"></div>
 
-        <!-- Seção 3: medições de atmosfera, usadas pela validação automática. -->
-        <section class="card" data-form-step="3">
-          <h2>3. Medições de gases perigosos</h2>
-          <p class="hint">Critérios de liberação adotados no modelo: O₂ entre 19,5% e 23%; inflamável &lt; 10% LIE; H₂S &lt; 5 ppm; CO &lt; 25 ppm.</p>
-          <div class="table-wrap gas-wrap">
-            <table id="gasTable" class="gas-table">
-              <thead>
-                <tr>
-                  <th scope="col">Teste</th><th scope="col">Hora</th><th scope="col">Oxigênio (%)</th><th scope="col">Inflamável (% LIE)</th><th scope="col">H₂S (ppm)</th><th scope="col">CO (ppm)</th><th scope="col">Obs.</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr data-gas-row="inicial">
-                  <th scope="row">1 — Teste inicial</th>
-                  <td><input type="time" name="gas_inicial_hora" aria-label="Teste inicial: hora" required /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_inicial_o2" aria-label="Teste inicial: oxigênio em porcentagem" required /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_inicial_lie" aria-label="Teste inicial: inflamável em porcentagem do LIE" required /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_inicial_h2s" aria-label="Teste inicial: H2S em ppm" required /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_inicial_co" aria-label="Teste inicial: CO em ppm" required /></td>
-                  <td><input name="gas_inicial_obs" aria-label="Teste inicial: observações" /></td>
-                </tr>
-                <tr data-gas-row="ventilacao">
-                  <th scope="row">2 — Após ventilação</th>
-                  <td><input type="time" name="gas_ventilacao_hora" aria-label="Teste após ventilação: hora" /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_ventilacao_o2" aria-label="Teste após ventilação: oxigênio em porcentagem" /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_ventilacao_lie" aria-label="Teste após ventilação: inflamável em porcentagem do LIE" /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_ventilacao_h2s" aria-label="Teste após ventilação: H2S em ppm" /></td>
-                  <td><input type="number" min="0" step="0.1" name="gas_ventilacao_co" aria-label="Teste após ventilação: CO em ppm" /></td>
-                  <td><input name="gas_ventilacao_obs" aria-label="Teste após ventilação: observações" /></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <label>Observações das medições
-            <textarea name="gasObservacoes" rows="2"></textarea>
-          </label>
-        </section>
+        <form id="petForm" autocomplete="off" novalidate>
 
-        <!-- Seção 4: lista dinâmica de profissionais, fotos e canvas de assinatura. -->
-        <section class="card" data-form-step="4">
-          <h2>4. Relação de profissionais e assinaturas</h2>
-          <p class="hint">Capture a foto do servidor e assine no campo correspondente. A foto deve mostrar o rosto do servidor com o crachá funcional visível. Foto, assinatura, data/hora, matrícula e demais dados entram no arquivo de validação da PET (JSON).</p>
-          <div id="peopleList" class="people-list"></div>
-          <div class="actions no-print">
-            <button type="button" id="addEntrante" class="secondary">Adicionar entrante</button>
-            <button type="button" id="addVigia" class="secondary">Adicionar vigia</button>
-          </div>
-        </section>
-
-        <!-- Seção 5: ciência das orientações e observações gerais. -->
-        <section class="card" data-form-step="5">
-          <h2>5. Nota de orientação e ciência</h2>
-          <ol class="orientation">
-            <li>O acesso ao espaço confinado só deve ocorrer após a emissão e endosso da PET.</li>
-            <li>A PET deve ser encerrada ou cancelada quando o serviço terminar, ocorrer condição não prevista, houver interrupção ou troca de equipe.</li>
-            <li>A PET é válida somente para cada entrada e sua validade não deve exceder o limite regulamentar aplicável.</li>
-            <li>O vigia não pode realizar outras tarefas que comprometam o monitoramento dos trabalhadores autorizados.</li>
-            <li>Não é permitido trabalho em espaço confinado de forma individual ou isolada.</li>
-            <li>Compete ao supervisor emitir, encerrar ou cancelar a PET, realizar testes, conferir equipamentos e checar os procedimentos.</li>
-            <li>O trabalhador portador do monitor de gás deve ser o último a sair.</li>
-            <li>Em caso de alarme do monitor de gás, todos os trabalhadores devem abandonar o local imediatamente.</li>
-          </ol>
-          <label class="checkline"><input required type="checkbox" name="declaracaoCiencia" /> Declaro que as informações foram conferidas e que os envolvidos tiveram ciência das orientações da PET.</label>
-          <label>Observações gerais
-            <textarea name="observacoes" rows="4" placeholder="Observações, restrições, bloqueios, plano de resgate, intercorrências..."></textarea>
-          </label>
-        </section>
-
-        <!-- Seção 6: comandos de validação, finalização, impressão e arquivo de validação da PET (JSON). -->
-        <section class="card status-card no-print" data-form-step="6">
-          <h2>6. Finalização e documentos</h2>
-          <div id="validationBox" class="validation-box" role="status" aria-live="polite">As etapas anteriores são validadas ao avançar. Nesta etapa, confira o resumo e finalize a PET oficial.</div>
-          <div class="actions final-primary-actions">
-            <button type="button" id="finalizeBtn">Finalizar PET oficial</button>
-            <button type="button" id="registerServerBtn" class="secondary hidden" disabled>Repetir envio pendente</button>
-          </div>
-          <div id="documentActions" class="document-actions hidden">
-            <h3>Documentos gerados</h3>
-            <div class="actions document-share-actions">
-              <button type="button" id="sharePdfBtn" class="secondary" disabled>Compartilhar PDF</button>
-              <button type="button" id="shareJsonBtn" class="secondary" disabled>Compartilhar arquivo de validação (JSON)</button>
-            </div>
-            <details class="advanced-details output-more-actions">
-              <summary>Outras opções</summary>
-              <div class="actions">
-                <button type="button" id="printBtn" class="ghost" disabled>Abrir PDF oficial</button>
-                <button type="button" id="exportBtn" class="ghost" disabled>Salvar arquivo de validação (JSON)</button>
+          <!-- Etapa 1: identificação -->
+          <section class="form-step" data-form-step="1">
+            <div class="card stack">
+              <label class="field">Nome da unidade
+                <input name="unidade" required placeholder="Ex.: DMAE — Manutenção de Esgoto" />
+              </label>
+              <label class="field">Local do espaço confinado
+                <input name="local" required placeholder="Endereço, PV, reservatório, elevatória" />
+              </label>
+              <label class="field">Data<input name="data" type="date" required /></label>
+              <div class="two-cols">
+                <label class="field">Hora da emissão<input name="horaEmissao" type="time" required /></label>
+                <label class="field">Término previsto<input name="horaTermino" type="time" required /></label>
               </div>
-            </details>
-          </div>
-          <div id="integrityPanel" class="integrity-panel hidden"></div>
-          <div id="serverPanel" class="integrity-panel hidden"></div>
-        </section>
-      </form>
+              <label class="field">Trabalho a ser realizado
+                <textarea name="trabalho" rows="3" required placeholder="Descreva o serviço autorizado"></textarea>
+              </label>
+              <div class="info-row">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>
+                <div>
+                  <span class="info-label">Supervisor de entrada</span>
+                  <span id="supervisorAutoLabel" class="info-value">Preenchido a partir da etapa Equipe</span>
+                </div>
+              </div>
+            </div>
+            <div class="card stack">
+              <h3>Equipe de salvamento</h3>
+              <div class="segmented" id="salvamentoGroup" role="radiogroup" aria-label="Equipe de salvamento">
+                <label><input type="radio" name="equipeSalvamento" value="Própria" required /><span>Própria</span></label>
+                <label><input type="radio" name="equipeSalvamento" value="Corpo de Bombeiro" /><span>Bombeiros</span></label>
+                <label><input type="radio" name="equipeSalvamento" value="Outra" /><span>Outra</span></label>
+              </div>
+              <label class="field">Telefone de acionamento
+                <input name="telefoneSalvamento" inputmode="tel" value="193" />
+              </label>
+            </div>
+            <div class="card stack">
+              <h3>Detector de gases</h3>
+              <label class="field">Nº de série ou patrimônio
+                <input name="detectorId" required placeholder="Ex.: MX4-0231" />
+              </label>
+              <label class="field">Calibração válida até
+                <input name="detectorCalibracao" type="date" required />
+              </label>
+            </div>
+          </section>
 
-      <!-- Área de impressão: preenchida dinamicamente apenas após finalizar/gerar PDF. -->
-      <section id="printArea" class="print-area hidden"></section>
-    </section>
+          <!-- Etapa 2: checklist -->
+          <section class="form-step" data-form-step="2">
+            <div class="sticky-progress">
+              <div class="sticky-progress-text"><span id="checklistProgressText">0 de 22 respondidos</span><span class="muted">N/A pede justificativa</span></div>
+              <div class="progress"><span id="checklistProgressBar"></span></div>
+            </div>
+            <div id="checklistGroups"></div>
+          </section>
 
+          <!-- Etapa 3: medições -->
+          <section class="form-step" data-form-step="3">
+            <div class="card stack" id="gasInitialCard">
+              <h3>Teste inicial</h3>
+              <label class="field">Hora da medição<input name="gas_inicial_hora" type="time" /></label>
+              <div class="gas-field" data-gas="o2">
+                <label class="field">Oxigênio (O₂)<span class="unit-row"><input name="gas_inicial_o2" inputmode="decimal" placeholder="0" /><span class="unit">%</span></span></label>
+                <div class="gas-meta"><span class="muted small-text">Limite: entre 19,5 e 23</span><span class="status-chip hidden" data-gas-status="gas_inicial_o2"></span></div>
+              </div>
+              <div class="gas-field" data-gas="lie">
+                <label class="field">Inflamáveis<span class="unit-row"><input name="gas_inicial_lie" inputmode="decimal" placeholder="0" /><span class="unit">% LIE</span></span></label>
+                <div class="gas-meta"><span class="muted small-text">Limite: abaixo de 10</span><span class="status-chip hidden" data-gas-status="gas_inicial_lie"></span></div>
+              </div>
+              <div class="gas-field" data-gas="h2s">
+                <label class="field">Sulfeto de hidrogênio (H₂S)<span class="unit-row"><input name="gas_inicial_h2s" inputmode="decimal" placeholder="0" /><span class="unit">ppm</span></span></label>
+                <div class="gas-meta"><span class="muted small-text">Limite: abaixo de 5</span><span class="status-chip hidden" data-gas-status="gas_inicial_h2s"></span></div>
+              </div>
+              <div class="gas-field" data-gas="co">
+                <label class="field">Monóxido de carbono (CO)<span class="unit-row"><input name="gas_inicial_co" inputmode="decimal" placeholder="0" /><span class="unit">ppm</span></span></label>
+                <div class="gas-meta"><span class="muted small-text">Limite: abaixo de 25</span><span class="status-chip hidden" data-gas-status="gas_inicial_co"></span></div>
+              </div>
+              <label class="field">Observações do teste inicial<input name="gas_inicial_obs" placeholder="Opcional" /></label>
+            </div>
 
-    <!-- Aba Sistema: sessão, senha, autorização unificada do aparelho e administração. -->
-    <section id="systemTab" class="tab">
-      <section class="card">
-        <h2>Minha conta</h2>
-        <p class="hint">Confira a sessão ativa e altere sua senha quando necessário.</p>
-        <details class="advanced-details"><summary>Detalhes técnicos</summary><p>Serviço configurado: <code id="apiBaseLabel"></code></p></details>
-        <div id="sessionStatus" class="validation-box">Carregando status...</div>
-        <div id="passwordChangeNotice" class="validation-box warn hidden"></div>
-        <div class="grid cols-3 password-change-grid">
-          <label>Senha atual
-            <input id="currentPassword" type="password" autocomplete="current-password" />
-          </label>
-          <label>Nova senha
-            <input id="newOwnPassword" type="password" autocomplete="new-password" minlength="8" />
-          </label>
-          <label>Confirmar nova senha
-            <input id="confirmOwnPassword" type="password" autocomplete="new-password" minlength="8" />
-          </label>
+            <div id="ventNeededNotice" class="alert alert-warn hidden" role="status">
+              <strong>Medição fora do limite.</strong> Ventile o espaço e registre o teste após ventilação. A entrada só pode ser autorizada com todos os valores dentro do limite.
+            </div>
+
+            <div class="card stack hidden" id="ventCard">
+              <h3>Teste após ventilação</h3>
+              <label class="field">Hora da medição<input name="gas_ventilacao_hora" type="time" /></label>
+              <div class="gas-field" data-gas="o2">
+                <label class="field">Oxigênio (O₂)<span class="unit-row"><input name="gas_ventilacao_o2" inputmode="decimal" placeholder="0" /><span class="unit">%</span></span></label>
+                <div class="gas-meta"><span class="muted small-text">Limite: entre 19,5 e 23</span><span class="status-chip hidden" data-gas-status="gas_ventilacao_o2"></span></div>
+              </div>
+              <div class="gas-field" data-gas="lie">
+                <label class="field">Inflamáveis<span class="unit-row"><input name="gas_ventilacao_lie" inputmode="decimal" placeholder="0" /><span class="unit">% LIE</span></span></label>
+                <div class="gas-meta"><span class="muted small-text">Limite: abaixo de 10</span><span class="status-chip hidden" data-gas-status="gas_ventilacao_lie"></span></div>
+              </div>
+              <div class="gas-field" data-gas="h2s">
+                <label class="field">Sulfeto de hidrogênio (H₂S)<span class="unit-row"><input name="gas_ventilacao_h2s" inputmode="decimal" placeholder="0" /><span class="unit">ppm</span></span></label>
+                <div class="gas-meta"><span class="muted small-text">Limite: abaixo de 5</span><span class="status-chip hidden" data-gas-status="gas_ventilacao_h2s"></span></div>
+              </div>
+              <div class="gas-field" data-gas="co">
+                <label class="field">Monóxido de carbono (CO)<span class="unit-row"><input name="gas_ventilacao_co" inputmode="decimal" placeholder="0" /><span class="unit">ppm</span></span></label>
+                <div class="gas-meta"><span class="muted small-text">Limite: abaixo de 25</span><span class="status-chip hidden" data-gas-status="gas_ventilacao_co"></span></div>
+              </div>
+              <label class="field">Observações do teste após ventilação<input name="gas_ventilacao_obs" placeholder="Opcional" /></label>
+              <button type="button" id="removeVentBtn" class="link danger-text hidden">Remover teste após ventilação</button>
+            </div>
+            <button type="button" id="addVentBtn" class="btn secondary block">Adicionar teste após ventilação</button>
+          </section>
+
+          <!-- Etapa 4: equipe -->
+          <section class="form-step" data-form-step="4">
+            <p class="hint">Toque em cada pessoa para informar os dados, tirar a foto com o crachá visível e colher a assinatura.</p>
+            <div id="peopleList" class="people-list"></div>
+            <div class="two-cols">
+              <button type="button" id="addEntrante" class="btn secondary">+ Entrante</button>
+              <button type="button" id="addVigia" class="btn secondary">+ Vigia</button>
+            </div>
+          </section>
+
+          <!-- Etapa 5: ciência -->
+          <section class="form-step" data-form-step="5">
+            <div class="card stack">
+              <h3>Notas de orientação</h3>
+              <ol class="orientation">
+                <li>O acesso ao espaço confinado só deve ocorrer após a emissão e o endosso da PET.</li>
+                <li>A PET deve ser encerrada ou cancelada ao término do serviço, em condição não prevista, interrupção ou troca de equipe.</li>
+                <li>A PET é válida somente para cada entrada.</li>
+                <li>O vigia não pode realizar outras tarefas que comprometam o monitoramento dos trabalhadores autorizados.</li>
+                <li>Não é permitido trabalho em espaço confinado de forma individual ou isolada.</li>
+                <li>Compete ao supervisor emitir, encerrar ou cancelar a PET, realizar testes, conferir equipamentos e checar os procedimentos.</li>
+                <li>O portador do monitor de gás deve ser o último a sair. Em caso de alarme, todos devem abandonar o local imediatamente.</li>
+              </ol>
+            </div>
+            <label class="consent-card" id="cienciaCard">
+              <input type="checkbox" name="declaracaoCiencia" required />
+              <span>Confirmo que as informações foram conferidas e que toda a equipe tomou ciência das orientações da PET.</span>
+            </label>
+            <div class="card">
+              <label class="field">Observações da PET
+                <textarea name="observacoes" rows="4" placeholder="Restrições, bloqueios, plano de resgate, intercorrências"></textarea>
+              </label>
+            </div>
+          </section>
+
+          <!-- Etapa 6: revisão -->
+          <section class="form-step" data-form-step="6">
+            <div id="deviceBlockedNotice" class="alert alert-warn hidden" role="status"></div>
+            <div id="pendingAttemptBox" class="alert alert-bad hidden" role="status">
+              <strong>Envio pendente</strong>
+              <p id="pendingAttemptText"></p>
+              <button type="button" id="registerServerBtn" class="btn primary block">Repetir envio ao sistema</button>
+            </div>
+            <div id="reviewPending" class="alert alert-bad hidden" role="status"></div>
+            <div id="reviewContent" class="stack"></div>
+            <div id="serverPanel" class="alert hidden" role="status"></div>
+            <p class="hint">Ao finalizar, o aplicativo gera o PDF e o arquivo de validação, assina com a chave deste aparelho e registra a PET no sistema.</p>
+          </section>
+        </form>
+      </div>
+
+      <!-- Editor de uma pessoa da equipe -->
+      <div id="personView" class="stack hidden">
+        <button type="button" id="personBackBtn" class="link back-link">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 6-6 6 6 6"/></svg>Voltar para a equipe
+        </button>
+        <h2 id="personRoleTitle" class="page-title"></h2>
+        <div class="card stack">
+          <label class="field">Nome completo<input id="personNome" autocomplete="off" /></label>
+          <label class="field">Matrícula<input id="personMatricula" inputmode="numeric" autocomplete="off" /></label>
         </div>
-        <div class="actions no-print">
-          <button type="button" id="changeOwnPasswordBtn" class="secondary">Alterar minha senha</button>
-          <button type="button" id="logoutBtn" class="ghost">Sair do sistema</button>
+        <div class="card stack">
+          <h3>Foto com crachá</h3>
+          <div id="personPhotoPreview" class="photo-preview"><span>Rosto e crachá funcional devem aparecer na foto</span></div>
+          <label class="btn primary block file-btn">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+            <span id="personPhotoLabel">Tirar foto</span>
+            <input id="personPhotoInput" type="file" accept="image/*" capture="environment" class="visually-hidden" />
+          </label>
+          <span id="personPhotoInfo" class="muted small-text">Abre a câmera traseira, para fotografar o colega.</span>
         </div>
-      </section>
+        <div class="card stack">
+          <h3>Assinatura</h3>
+          <div id="personSigPreview" class="signature-preview"><span>Assinatura pendente</span></div>
+          <button type="button" id="personSignBtn" class="btn primary block">Assinar em tela cheia</button>
+          <span id="personSigInfo" class="muted small-text"></span>
+        </div>
+        <button type="button" id="personRemoveBtn" class="link danger-text center hidden">Remover</button>
+        <button type="button" id="personDoneBtn" class="btn secondary block">Concluir e voltar</button>
+      </div>
 
-      <section class="card device-card">
-        <h2>Este dispositivo</h2>
-        <p class="hint"><strong>Uma única ação:</strong> ao clicar no botão abaixo, o aplicativo prepara a proteção deste aparelho e envia a solicitação de autorização. Não é necessário preparar a chave em outra aba.</p>
-        <p class="hint">Para usuários operacional/verificador, um gestor ou administrador deverá clicar em <strong>Aprovar</strong> uma única vez. Para gestor/admin, a autorização é concluída automaticamente.</p>
-        <div id="deviceRegistrationStatus" class="validation-box">Consultando este dispositivo...</div>
-        <label>Nome para identificar este aparelho
-          <input id="deviceLabel" placeholder="Ex.: Celular de campo / Tablet equipe 1" />
-        </label>
-        <div class="actions no-print">
-          <button type="button" id="registerDeviceBtn" class="secondary">Configurar e solicitar autorização</button>
-          <button type="button" id="refreshDevicesBtn" class="ghost">Atualizar situação</button>
+      <!-- Conclusão -->
+      <div id="doneView" class="stack hidden">
+        <div class="card done-card">
+          <span class="done-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></span>
+          <h2>PET registrada no sistema</h2>
+          <span id="doneNumero" class="done-number"></span>
+          <span id="doneHora" class="muted"></span>
         </div>
-        <details class="advanced-details device-advanced">
-          <summary>Detalhes e manutenção deste aparelho</summary>
-          <div id="keyStatus" class="key-status"></div>
-          <div class="actions no-print">
-            <button type="button" id="exportPublicKey" class="secondary small">Baixar dados técnicos</button>
-            <button type="button" id="resetKey" class="danger ghost small">Apagar proteção local</button>
+        <div class="alert alert-info"><p>Envie <strong>os dois arquivos</strong> ao supervisor responsável. A validação oficial exige o PDF e o arquivo de validação juntos.</p></div>
+        <button type="button" id="sharePdfBtn" class="btn primary block tall">Enviar PDF</button>
+        <button type="button" id="shareJsonBtn" class="btn accent block tall">Enviar arquivo de validação</button>
+        <details class="card details">
+          <summary>Outras opções</summary>
+          <div class="stack">
+            <button type="button" id="printBtn" class="btn secondary block">Abrir PDF</button>
+            <button type="button" id="exportBtn" class="btn secondary block">Salvar arquivo de validação</button>
+            <div id="integrityPanel" class="small-text"></div>
           </div>
         </details>
-      </section>
-
-      <section id="teamDevicesSection" class="card hidden">
-        <h2>Autorizações de dispositivos da equipe</h2>
-        <p class="hint">As solicitações pendentes aparecem primeiro. Ao clicar em <strong>Aprovar</strong>, a autorização é concluída imediatamente; não existe outra confirmação a ser feita pelo usuário.</p>
-        <div id="devicesList" class="records-list"></div>
-      </section>
-
-      <section id="userManagementSection" class="card hidden">
-        <h2>Usuários</h2>
-        <p class="hint">Gestor administra operacional e verificador. Somente admin administra gestor e admin. A opção “Excluir acesso” preserva o histórico das PETs e encerra as sessões/dispositivos do usuário.</p>
-        <div class="grid cols-3">
-          <label>Nome
-            <input id="newUserName" placeholder="Nome completo" />
-          </label>
-          <label>Matrícula
-            <input id="newUserMatricula" placeholder="Matrícula" />
-          </label>
-          <label>E-mail
-            <input id="newUserEmail" type="email" placeholder="email@dmae..." />
-          </label>
-        </div>
-        <div class="grid cols-3">
-          <label>Perfil
-            <select id="newUserRole"></select>
-          </label>
-          <label>Unidade
-            <input id="newUserUnit" placeholder="Setor/unidade" />
-          </label>
-          <label>Senha temporária
-            <input id="newUserPassword" type="password" placeholder="Mínimo de 8 caracteres" />
-          </label>
-        </div>
-        <div class="actions no-print">
-          <button type="button" id="createUserBtn" class="secondary">Cadastrar usuário</button>
-          <button type="button" id="refreshUsersBtn" class="ghost">Atualizar usuários</button>
-        </div>
-        <div id="usersList" class="records-list"></div>
-      </section>
-
-      <section class="card">
-        <h2>Consultar registro da PET</h2>
-        <p class="hint">Consulta se o código de conferência da PET foi registrado no sistema. A validação completa exige o PDF e o arquivo de validação da PET (JSON).</p>
-        <label>Código de conferência
-          <input id="serverHashInput" placeholder="Cole o código de 64 caracteres" />
-        </label>
-        <div class="actions no-print">
-          <button type="button" id="serverValidateBtn" class="secondary">Consultar registro da PET</button>
-        </div>
-        <div id="serverValidateResult" class="validation-box"></div>
-      </section>
+        <button type="button" id="newPetBtn" class="btn secondary block">Iniciar nova PET</button>
+      </div>
     </section>
 
-    <!-- Janela de edição cadastral. Só é aberta quando o perfil logado pode administrar o alvo. -->
-    <dialog id="editUserDialog" class="app-dialog">
-      <form method="dialog" id="editUserForm">
-        <h2>Editar usuário</h2>
-        <input type="hidden" id="editUserId" />
-        <div class="grid cols-2">
-          <label>Nome<input id="editUserName" required /></label>
-          <label>Matrícula<input id="editUserMatricula" required /></label>
-          <label>E-mail<input id="editUserEmail" type="email" /></label>
-          <label>Unidade<input id="editUserUnit" /></label>
-          <label>Perfil<select id="editUserRole"></select></label>
-          <label>Situação
-            <select id="editUserStatus">
-              <option value="active">Ativo</option>
-              <option value="suspended">Suspenso</option>
-              <option value="disabled">Desabilitado</option>
-              <option value="pending">Pendente</option>
-            </select>
-          </label>
-        </div>
-        <div class="actions dialog-actions">
-          <button type="button" id="saveUserEditBtn">Salvar alterações</button>
-          <button type="button" class="ghost" data-close-dialog="editUserDialog">Cancelar</button>
-        </div>
-      </form>
-    </dialog>
-
-    <!-- Janela para o administrador/gestor definir uma senha temporária. -->
-    <dialog id="resetPasswordDialog" class="app-dialog">
-      <form method="dialog" id="resetPasswordForm">
-        <h2>Redefinir senha</h2>
-        <p id="resetPasswordUserLabel" class="hint"></p>
-        <input type="hidden" id="resetPasswordUserId" />
-        <label>Nova senha temporária
-          <input id="temporaryPassword" type="password" minlength="8" autocomplete="new-password" />
-        </label>
-        <label>Confirmar senha temporária
-          <input id="temporaryPasswordConfirm" type="password" minlength="8" autocomplete="new-password" />
-        </label>
-        <p class="hint">As sessões antigas serão encerradas. No próximo login, o usuário será orientado a escolher uma senha própria.</p>
-        <div class="actions dialog-actions">
-          <button type="button" id="confirmResetPasswordBtn">Redefinir senha</button>
-          <button type="button" class="ghost" data-close-dialog="resetPasswordDialog">Cancelar</button>
-        </div>
-      </form>
-    </dialog>
-
-    <!-- Aba Registros: lista PETs finalizadas e salvas no localStorage deste dispositivo. -->
+    <!-- ===================== MINHAS PETs ===================== -->
     <section id="recordsTab" class="tab">
-      <section class="card">
-        <h2>Registros salvos neste dispositivo</h2>
-        <p class="hint">Registros salvos apenas neste dispositivo (até 30 referências recentes). Os dados locais são temporários e podem desaparecer por limpeza do navegador, troca de aparelho ou atualização do sistema. Após gerar a PET, envie imediatamente o PDF e o arquivo de validação da PET (JSON) ao supervisor responsável.</p>
-        <div class="actions no-print">
-          <button type="button" id="refreshRecords" class="secondary">Atualizar lista</button>
-        </div>
-        <div id="recordsList" class="records-list"></div>
-      </section>
+      <h2 class="page-title">Minhas PETs</h2>
+      <p class="hint">PETs emitidas neste aparelho (até 30). Os arquivos ficam aqui temporariamente: envie-os ao supervisor logo após a emissão.</p>
+      <div id="recordsList" class="stack"></div>
     </section>
 
-    <!-- Aba Validar: importa o arquivo de validação da PET (JSON) e confere integridade/assinaturas. -->
-    <section id="verifyTab" class="tab">
-      <section class="card">
-        <h2>Validar PET Digital</h2>
-        <p>Selecione o <strong>PDF oficial</strong> e o <strong>arquivo de validação da PET (JSON)</strong> correspondentes. O aplicativo recalcula os hashes reais dos dois arquivos e consulta o registro do servidor; não confia apenas nos dados contidos no próprio arquivo.</p>
-        <div class="verify-file-grid">
-          <label>PDF oficial
-            <input type="file" id="verifyPdfFile" accept="application/pdf,.pdf" />
-          </label>
-          <label>Arquivo de validação da PET (JSON)
-            <input type="file" id="verifyJsonFile" accept="application/json,.json" />
-          </label>
+    <!-- ===================== CONTA ===================== -->
+    <section id="accountTab" class="tab">
+      <h2 class="page-title">Minha conta</h2>
+      <div class="card stack-tight">
+        <strong id="accountName" class="account-name"></strong>
+        <span id="accountInfo" class="muted"></span>
+        <span id="accountSession" class="muted small-text"></span>
+        <span id="appVersionLabel" class="muted small-text"></span>
+      </div>
+      <div id="passwordChangeNotice" class="alert alert-warn hidden"></div>
+
+      <div class="card stack">
+        <h3>Este aparelho</h3>
+        <div id="deviceRegistrationStatus" class="alert alert-neutral">Consultando este aparelho...</div>
+        <label class="field" id="deviceLabelField">Nome para identificar este aparelho
+          <input id="deviceLabel" placeholder="Ex.: Celular de campo — Equipe 2" />
+        </label>
+        <button type="button" id="registerDeviceBtn" class="btn primary block">Solicitar autorização deste aparelho</button>
+        <button type="button" id="refreshDevicesBtn" class="btn secondary block">Atualizar situação</button>
+        <details class="details">
+          <summary>Detalhes técnicos e manutenção</summary>
+          <div id="keyStatus" class="small-text"></div>
+          <p class="small-text muted">Serviço: <code id="apiBaseLabel"></code></p>
+          <div class="two-cols">
+            <button type="button" id="exportPublicKey" class="btn secondary small">Baixar dados técnicos</button>
+            <button type="button" id="resetKey" class="btn danger-outline small">Apagar proteção local</button>
+          </div>
+        </details>
+      </div>
+
+      <div class="card stack">
+        <button type="button" id="pwdToggleBtn" class="link" aria-expanded="false" aria-controls="pwdPanel">Alterar minha senha</button>
+        <div id="pwdPanel" class="stack hidden">
+          <label class="field">Senha atual<input id="currentPassword" type="password" autocomplete="current-password" /></label>
+          <label class="field">Nova senha<input id="newOwnPassword" type="password" autocomplete="new-password" minlength="8" placeholder="Mínimo de 8 caracteres" /></label>
+          <label class="field">Repita a nova senha<input id="confirmOwnPassword" type="password" autocomplete="new-password" minlength="8" /></label>
+          <button type="button" id="changeOwnPasswordBtn" class="btn primary block">Salvar nova senha</button>
         </div>
-        <div class="actions no-print">
-          <button type="button" id="verifyFilesBtn">Validar os dois arquivos</button>
-        </div>
-        <p class="hint">A validação oficial está disponível para os perfis verificador, gestor e administrador e exige conexão com o servidor.</p>
-        <div id="verifyResult" class="validation-box"></div>
-      </section>
+      </div>
+      <button type="button" id="logoutBtn" class="btn danger-outline block">Sair do sistema</button>
     </section>
 
+    <!-- ===================== GESTÃO ===================== -->
+    <section id="manageTab" class="tab">
+      <h2 class="page-title">Gestão</h2>
+
+      <div id="teamDevicesSection" class="card stack hidden">
+        <div class="row-between"><h3>Aparelhos da equipe</h3><span id="devicesCount" class="count-pill hidden"></span></div>
+        <p class="hint">Solicitações pendentes aparecem primeiro. Ao aprovar, o servidor já pode emitir PETs naquele aparelho.</p>
+        <div id="devicesList" class="stack"></div>
+      </div>
+
+      <div id="userManagementSection" class="card stack hidden">
+        <div class="row-between"><h3>Usuários</h3><button type="button" id="newUserToggle" class="link" aria-expanded="false" aria-controls="newUserPanel">+ Cadastrar</button></div>
+        <div id="newUserPanel" class="stack hidden">
+          <label class="field">Nome<input id="newUserName" placeholder="Nome completo" /></label>
+          <label class="field">Matrícula<input id="newUserMatricula" inputmode="numeric" /></label>
+          <label class="field">E-mail<input id="newUserEmail" type="email" placeholder="Opcional" /></label>
+          <label class="field">Perfil<select id="newUserRole"></select></label>
+          <label class="field">Unidade<input id="newUserUnit" placeholder="Setor ou unidade" /></label>
+          <label class="field">Senha temporária<input id="newUserPassword" type="password" autocomplete="new-password" placeholder="Mínimo de 8 caracteres" /></label>
+          <button type="button" id="createUserBtn" class="btn primary block">Cadastrar usuário</button>
+        </div>
+        <div id="usersList" class="stack"></div>
+      </div>
+
+      <div id="verifySection" class="card stack">
+        <h3>Validar uma PET recebida</h3>
+        <p class="hint">Selecione o PDF e o arquivo de validação que você recebeu. O sistema confere os dois arquivos e o registro no servidor.</p>
+        <label class="field">PDF da PET<input type="file" id="verifyPdfFile" accept="application/pdf,.pdf" /></label>
+        <label class="field">Arquivo de validação (JSON)<input type="file" id="verifyJsonFile" accept="application/json,.json" /></label>
+        <button type="button" id="verifyFilesBtn" class="btn primary block">Validar documento</button>
+        <div id="verifyResult" class="alert hidden"></div>
+      </div>
+
+      <div class="card stack">
+        <h3>Consultar código de conferência</h3>
+        <label class="field">Código técnico (64 caracteres)<input id="serverHashInput" autocomplete="off" /></label>
+        <button type="button" id="serverValidateBtn" class="btn secondary block">Consultar registro</button>
+        <div id="serverValidateResult" class="alert hidden"></div>
+      </div>
+    </section>
   </main>
 
-  <footer id="appFooter" class="footer no-print hidden">
-    <span>PET Digital NR-33 — DMAE • Permissão de Entrada e Trabalho para Espaço Confinado</span>
-  </footer>
+  <!-- Barra fixa das etapas -->
+  <div id="stepBar" class="step-bar hidden">
+    <button type="button" id="formPrevBtn" class="btn secondary">Voltar</button>
+    <button type="button" id="formNextBtn" class="btn primary">Próxima etapa</button>
+  </div>
+
+  <!-- Assinatura em tela cheia -->
+  <div id="signatureOverlay" class="overlay sig-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="signatureTitle">
+    <div class="row-between"><h2 id="signatureTitle">Assinatura</h2><button type="button" id="sigCancelBtn" class="link">Cancelar</button></div>
+    <strong id="signatureWho"></strong>
+    <span class="muted small-text">Dica: gire o celular na horizontal para ter mais espaço.</span>
+    <div class="sig-pad-wrap">
+      <canvas id="signaturePad" width="1200" height="600"></canvas>
+      <span class="sig-baseline" aria-hidden="true"></span>
+    </div>
+    <div class="sig-actions">
+      <button type="button" id="sigClearBtn" class="btn secondary">Apagar</button>
+      <button type="button" id="sigConfirmBtn" class="btn primary">Confirmar assinatura</button>
+    </div>
+  </div>
+
+  <!-- Processamento da emissão -->
+  <div id="busyOverlay" class="overlay busy-overlay hidden" role="alertdialog" aria-live="assertive" aria-labelledby="busyTitle">
+    <svg class="spinner" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9"/></svg>
+    <strong id="busyTitle">Gerando PDF e arquivo de validação</strong>
+    <span id="busyText">Assinando com a chave deste aparelho e registrando no sistema. Não feche o aplicativo.</span>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <!-- Confirmação genérica (substitui window.confirm) -->
+  <dialog id="confirmDialog" class="app-dialog">
+    <form method="dialog" class="stack">
+      <p id="confirmMessage"></p>
+      <div class="two-cols">
+        <button type="button" id="confirmCancel" class="btn secondary">Cancelar</button>
+        <button type="button" id="confirmOk" class="btn primary">Confirmar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Edição cadastral -->
+  <dialog id="editUserDialog" class="app-dialog">
+    <form method="dialog" id="editUserForm" class="stack">
+      <h2>Editar usuário</h2>
+      <input type="hidden" id="editUserId" />
+      <label class="field">Nome<input id="editUserName" required /></label>
+      <label class="field">Matrícula<input id="editUserMatricula" required /></label>
+      <label class="field">E-mail<input id="editUserEmail" type="email" /></label>
+      <label class="field">Unidade<input id="editUserUnit" /></label>
+      <label class="field">Perfil<select id="editUserRole"></select></label>
+      <label class="field">Situação
+        <select id="editUserStatus">
+          <option value="active">Ativo</option>
+          <option value="suspended">Suspenso</option>
+          <option value="disabled">Desabilitado</option>
+          <option value="pending">Pendente</option>
+        </select>
+      </label>
+      <div class="two-cols">
+        <button type="button" class="btn secondary" data-close-dialog="editUserDialog">Cancelar</button>
+        <button type="button" id="saveUserEditBtn" class="btn primary">Salvar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Senha temporária -->
+  <dialog id="resetPasswordDialog" class="app-dialog">
+    <form method="dialog" id="resetPasswordForm" class="stack">
+      <h2>Redefinir senha</h2>
+      <p id="resetPasswordUserLabel" class="hint"></p>
+      <input type="hidden" id="resetPasswordUserId" />
+      <label class="field">Nova senha temporária<input id="temporaryPassword" type="password" minlength="8" autocomplete="new-password" /></label>
+      <label class="field">Confirmar senha temporária<input id="temporaryPasswordConfirm" type="password" minlength="8" autocomplete="new-password" /></label>
+      <p class="hint">As sessões antigas serão encerradas. No próximo login, o usuário escolherá uma senha própria.</p>
+      <div class="two-cols">
+        <button type="button" class="btn secondary" data-close-dialog="resetPasswordDialog">Cancelar</button>
+        <button type="button" id="confirmResetPasswordBtn" class="btn primary">Redefinir</button>
+      </div>
+    </form>
+  </dialog>
 
   <script defer src="app-core.js"></script>
   <script defer src="app-system.js"></script>

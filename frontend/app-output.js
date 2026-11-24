@@ -1,6 +1,6 @@
 'use strict';
 /**
- * PET-Digital v1.1.6 — documentos, registros e inicialização.
+ * PET-Digital v1.2.0 — documentos, registros e inicialização.
  * O quê: PDF, arquivo de validação, compartilhamento, histórico local, validação e boot do app.
  * Como: usa snapshots do IndexedDB e registra somente hashes/metadados no Worker.
  * Quando: após a finalização ou ao abrir Registros/Validar.
@@ -45,7 +45,10 @@ async function registerRecordOnServer(record, fileHashes = {}) {
   return data;
 }
 
-/** Repete somente o envio pendente, reutilizando número, arquivos e idempotência já criados. */
+/**
+ * Repete somente o envio pendente, reutilizando número, arquivos e idempotência já criados.
+ * Quando: botão "Repetir envio ao sistema" na revisão ou em Minhas PETs.
+ */
 async function retryPendingRecordRegistration(record, triggerButton) {
   record = normalizeFinalizationRecordStructure(await hydrateRecord(record));
   if (!record?.pendingOfficialRegistration) return;
@@ -53,43 +56,41 @@ async function retryPendingRecordRegistration(record, triggerButton) {
   if (!files?.pdfFile || !files?.jsonText || !record.output?.pdfHashSha256 || !record.output?.jsonHashSha256) {
     record.pendingOfficialRegistration = false;
     updateStoredRecord(record);
-    const retry = triggerButton || $('#registerServerBtn');
-    if (retry) { retry.disabled = true; retry.classList.add('hidden'); }
-    alert('A tentativa anterior foi interrompida antes de gerar os dois arquivos completos. O formulário pode ser finalizado novamente sem usar “Repetir registro pendente”.');
+    clearPendingPointer();
+    renderPendingAttempt();
+    renderRecords();
+    notify('A tentativa anterior foi interrompida antes de gerar os dois arquivos. Finalize a PET novamente.', 'bad');
     return;
   }
-  const button = triggerButton || $('#registerServerBtn');
+  const button = triggerButton;
   const original = button?.textContent || '';
   try {
-    if (button) { button.disabled = true; button.textContent = 'Repetindo registro...'; }
+    if (button) { button.disabled = true; button.textContent = 'Enviando...'; }
+    setBusy(true, 'Enviando ao sistema', 'Registrando a PET já gerada, com o mesmo número e os mesmos arquivos.');
     await registerRecordOnServer(record, { pdfFile: files.pdfFile, jsonText: files.jsonText });
-    record.pendingOfficialRegistration = false;
-    try { await saveOfficialFiles(record, files.pdfFile, files.jsonText); }
-    catch (localError) {
-      showStorageNotice('O servidor aceitou a PET, mas a cópia temporária do aparelho não pôde ser atualizada. Compartilhe os arquivos imediatamente.', 'warn');
-      console.warn('Falha ao atualizar snapshot local após repetição aceita', localError);
+    if (record.recordId === finalizedRecord?.recordId || !finalizedRecord) {
+      showTab('formTab');
+      await completeRegistration(record, files.pdfFile, files.jsonText);
+    } else {
+      record.pendingOfficialRegistration = false;
+      try { await saveOfficialFiles(record, files.pdfFile, files.jsonText); } catch {}
+      updateStoredRecord(record);
+      if (readPendingPointer()?.recordId === record.recordId) clearPendingPointer();
+      renderRecords();
     }
-    updateStoredRecord(record);
-    if (record.recordId === finalizedRecord?.recordId) {
-      finalizedRecord = record;
-      $('#documentActions')?.classList.remove('hidden');
-      ['#printBtn','#sharePdfBtn','#exportBtn','#shareJsonBtn'].forEach(sel => { const b=$(sel); if (b) b.disabled=false; });
-      $('#registerServerBtn')?.classList.add('hidden');
-      if ($('#finalizeBtn')) { $('#finalizeBtn').disabled = true; $('#finalizeBtn').textContent = 'PET finalizada'; }
-    }
-    renderRecords();
-    alert('Registro concluído sem criar nova PET.');
+    notify('Registro concluído, sem criar nova PET.', 'ok');
   } catch (err) {
-    alert('O registro continua pendente: ' + err.message);
+    notify('O registro continua pendente: ' + err.message, 'bad');
   } finally {
-    if (button && !record.serverRegistration) { button.disabled = false; button.textContent = original || 'Repetir registro pendente'; }
+    setBusy(false);
+    if (button && !record.serverRegistration) { button.disabled = false; button.textContent = original || 'Repetir envio ao sistema'; }
   }
 }
 
 /** Abre o PDF oficial exato salvo no IndexedDB; não recria arquivo com hash diferente. */
 async function openOfficialPdf(record, triggerButton) {
   if (!record) return;
-  if (!await ensureRecordReadyForOutput(record, 'abrir o PDF oficial')) return;
+  if (!await ensureRecordReadyForOutput(record)) return;
   const files = await readOfficialFiles(record);
   const button = triggerButton || $('#printBtn');
   const original = button?.textContent || '';
@@ -99,12 +100,12 @@ async function openOfficialPdf(record, triggerButton) {
     const opened = window.open(url, '_blank', 'noopener');
     if (!opened) downloadBlob(files.pdfFile, files.pdfFilename || pdfFilename(record));
     setTimeout(() => URL.revokeObjectURL(url), 60000);
-  } finally { if (button) { button.disabled = false; button.textContent = original || 'Abrir PDF oficial'; } }
+  } finally { if (button) { button.disabled = false; button.textContent = original || 'Abrir PDF'; } }
 }
 
 /** Compartilha o JSON exato cujo hash foi registrado no D1. */
 async function shareJsonRecord(record, triggerButton) {
-  if (!record || !await ensureRecordReadyForOutput(record, 'compartilhar o arquivo de validação da PET (JSON)')) return;
+  if (!record || !await ensureRecordReadyForOutput(record)) return;
   const files = await readOfficialFiles(record);
   const button = triggerButton || $('#shareJsonBtn');
   const original = button?.textContent || '';
@@ -112,13 +113,13 @@ async function shareJsonRecord(record, triggerButton) {
     if (button) { button.disabled = true; button.textContent = 'Compartilhando...'; }
     const file = new File([files.jsonText], files.jsonFilename || jsonFilename(record), { type: 'application/json' });
     await shareFilesOrDownload([file], 'Arquivo de validação PET Digital NR-33', `Arquivo de validação da ${record.payload?.fields?.petNumero || record.recordId}.`);
-  } catch (err) { if (err.name !== 'AbortError') alert('Não foi possível compartilhar: ' + err.message); }
-  finally { if (button) { button.disabled = false; button.textContent = original || 'Compartilhar arquivo de validação'; } }
+  } catch (err) { if (err.name !== 'AbortError') notify('Não foi possível compartilhar: ' + err.message, 'bad'); }
+  finally { if (button) { button.disabled = false; button.textContent = original || 'Enviar arquivo de validação'; } }
 }
 
 /** Compartilha o PDF exato cujo hash foi registrado no D1. */
 async function sharePdfRecord(record, triggerButton) {
-  if (!record || !await ensureRecordReadyForOutput(record, 'compartilhar o PDF oficial')) return;
+  if (!record || !await ensureRecordReadyForOutput(record)) return;
   const files = await readOfficialFiles(record);
   const button = triggerButton || $('#sharePdfBtn');
   const original = button?.textContent || '';
@@ -126,12 +127,12 @@ async function sharePdfRecord(record, triggerButton) {
     if (button) { button.disabled = true; button.textContent = 'Abrindo compartilhamento...'; }
     const file = files.pdfFile instanceof File ? files.pdfFile : new File([files.pdfFile], files.pdfFilename || pdfFilename(record), { type: 'application/pdf' });
     await shareFilesOrDownload([file], 'PET Digital NR-33 — PDF', `PDF da ${record.payload?.fields?.petNumero || record.recordId}.`);
-  } catch (err) { if (err.name !== 'AbortError') alert('Não foi possível compartilhar o PDF: ' + err.message); }
-  finally { if (button) { button.disabled = false; button.textContent = original || 'Compartilhar PDF'; } }
+  } catch (err) { if (err.name !== 'AbortError') notify('Não foi possível compartilhar o PDF: ' + err.message, 'bad'); }
+  finally { if (button) { button.disabled = false; button.textContent = original || 'Enviar PDF'; } }
 }
 
 /**
- * Geração de PDF nativa da v1.1.6.
+ * Geração de PDF nativa (desde a v1.1.6; ampliada na v1.2.0).
  * O quê: remove dependência de jsPDF/html2canvas e de qualquer CDN/biblioteca de terceiros.
  * Como: desenha páginas da PET em Canvas 2D usando somente APIs nativas do navegador e
  * monta um PDF simples que incorpora cada página como JPEG.
@@ -256,7 +257,7 @@ async function buildPdfChecklistPage(record) {
   ['SIM','NÃO','N/A'].forEach((label,i)=>ctx.fillText(label, x + colNo + questionW + i*colAnswer + 12, y + 12));
   y += headerH;
   const rowH = 36;
-  ctx.font = '13px Arial, sans-serif';
+  let hasNa = false;
   for (const item of record.payload?.checklist || []) {
     ctx.strokeStyle='#555'; ctx.strokeRect(x, y, full, rowH);
     [colNo, colNo + questionW, colNo + questionW + colAnswer, colNo + questionW + colAnswer*2].forEach(offset => { ctx.beginPath(); ctx.moveTo(x+offset,y); ctx.lineTo(x+offset,y+rowH); ctx.stroke(); });
@@ -264,46 +265,96 @@ async function buildPdfChecklistPage(record) {
     ctx.font='12.5px Arial, sans-serif'; drawWrappedText(ctx, item.item, x+colNo+7, y+5, questionW-12, 14, 2);
     ctx.font='700 19px Arial, sans-serif';
     const ai = item.answer === 'S' ? 0 : item.answer === 'N' ? 1 : item.answer === 'NA' ? 2 : -1;
-    if (ai >= 0) ctx.fillText('X', x + colNo + questionW + ai*colAnswer + 24, y + 7);
+    if (ai >= 0) ctx.fillText(item.answer === 'NA' ? 'X*' : 'X', x + colNo + questionW + ai*colAnswer + (item.answer === 'NA' ? 20 : 24), y + 7);
+    if (item.answer === 'NA') hasNa = true;
     y += rowH;
   }
   y += 8;
   ctx.font='700 13px Arial, sans-serif'; ctx.fillText('Observações:', x, y);
-  ctx.font='12px Arial, sans-serif'; y=drawWrappedText(ctx, f.observacoes || '—', x+90, y, full-90, 15, 2)+8;
+  ctx.font='12px Arial, sans-serif'; y=drawWrappedText(ctx, f.observacoes || '—', x+90, y, full-90, 15, 2)+4;
   ctx.font='11px Arial, sans-serif';
+  if (hasNa) { ctx.font='700 11px Arial, sans-serif'; ctx.fillText('* Itens N/A: as justificativas estão na página seguinte.', x, y); y += 17; ctx.font='11px Arial, sans-serif'; }
   const validationCode = `${record.recordId}-${record.integrity?.payloadHashSha256?.slice(0,12)?.toUpperCase() || ''}`;
-  drawWrappedText(ctx, `Código de conferência: ${validationCode} • Emissão técnica: ${formatDateTime(record.integrity?.finalizedAt)} • Validação oficial requer o PDF e o arquivo de validação da PET (JSON).`, x, Math.min(y, PDF_PAGE_HEIGHT-48), full, 14, 2);
+  drawWrappedText(ctx, `Código de conferência: ${validationCode} • Emissão técnica: ${formatDateTime(record.integrity?.finalizedAt)} • Validação oficial requer o PDF e o arquivo de validação da PET (JSON).`, x, Math.min(y, PDF_PAGE_HEIGHT-34), full, 14, 2);
   return canvas;
 }
 
-async function buildPdfAtmospherePage(record) {
+/** Interpreta medições digitadas com vírgula ou ponto (o PDF da v1.1.6 não aceitava vírgula). */
+function pdfGasNumber(raw) {
+  const text = String(raw ?? '').trim();
+  if (!text) return null;
+  const n = Number(text.replace(',', '.'));
+  return Number.isFinite(n) ? n : null;
+}
+
+function pdfGasSituation(f, prefix) {
+  if (!f[`${prefix}_hora`]) return 'Não realizado';
+  const v = { o2: pdfGasNumber(f[`${prefix}_o2`]), lie: pdfGasNumber(f[`${prefix}_lie`]), h2s: pdfGasNumber(f[`${prefix}_h2s`]), co: pdfGasNumber(f[`${prefix}_co`]) };
+  if (Object.values(v).some(n => n === null)) return 'Incompleto';
+  return v.o2 > 19.5 && v.o2 < 23 && v.lie < 10 && v.h2s < 5 && v.co < 25 ? 'Dentro dos limites' : 'Fora dos limites';
+}
+
+/**
+ * Página 2: medições, detector, justificativas de N/A, notas, declaração de ciência e registro técnico.
+ * v1.2.0: inclui o detector, as justificativas de N/A e a declaração de ciência, que antes só
+ * apareciam no arquivo de validação. Se as justificativas não couberem, seguem numa página extra.
+ */
+async function buildPdfAtmospherePages(record) {
+  const pages = [];
   const { canvas, ctx } = createPdfCanvas();
+  pages.push(canvas);
   await drawPdfHeader(ctx, 'PET — MEDIÇÕES, ORIENTAÇÕES E REGISTRO TÉCNICO');
   const f = record.payload?.fields || {};
   const x=PDF_MARGIN, full=PDF_PAGE_WIDTH-PDF_MARGIN*2;
-  let y=135;
+  let y=132;
   ctx.fillStyle='#d9d9d9'; ctx.fillRect(x,y,full,34); ctx.strokeStyle='#333'; ctx.strokeRect(x,y,full,34);
   ctx.fillStyle='#111'; ctx.font='700 18px Arial, sans-serif'; ctx.textAlign='center'; ctx.fillText('MEDIÇÕES DE GASES PERIGOSOS', PDF_PAGE_WIDTH/2, y+7); ctx.textAlign='left'; y+=34;
-  const cols=[260,170,220,210,190,190,full-1240];
-  const headings=['Teste/Hora','O₂ (%)','% LIE','H₂S (ppm)','CO (ppm)','Observações','Situação'];
+  const cols=[260,170,220,210,190,full-1250,200];
+  const headings=['Teste/Hora','O₂ (%) 19,5–23','% LIE (< 10)','H₂S ppm (< 5)','CO ppm (< 25)','Observações','Situação'];
   let cx=x; ctx.fillStyle='#ededed'; ctx.font='700 13px Arial, sans-serif';
-  headings.forEach((h,i)=>{ctx.fillRect(cx,y,cols[i],38);ctx.strokeRect(cx,y,cols[i],38);drawWrappedText(ctx,h,cx+6,y+7,cols[i]-12,14,2);cx+=cols[i];});
+  headings.forEach((h,i)=>{ctx.fillStyle='#ededed';ctx.fillRect(cx,y,cols[i],38);ctx.strokeRect(cx,y,cols[i],38);ctx.fillStyle='#111';drawWrappedText(ctx,h,cx+6,y+7,cols[i]-12,14,2);cx+=cols[i];});
   y+=38;
   const rows=[
-    ['Teste inicial',f.gas_inicial_hora,f.gas_inicial_o2,f.gas_inicial_lie,f.gas_inicial_h2s,f.gas_inicial_co,f.gas_inicial_obs],
-    ['Após ventilação',f.gas_ventilacao_hora,f.gas_ventilacao_o2,f.gas_ventilacao_lie,f.gas_ventilacao_h2s,f.gas_ventilacao_co,f.gas_ventilacao_obs]
+    ['Teste inicial','gas_inicial'],
+    ['Após ventilação','gas_ventilacao']
   ];
-  for (const row of rows) {
+  for (const [label, prefix] of rows) {
     cx=x; ctx.font='14px Arial, sans-serif';
-    const vals=[`${row[0]}\n${row[1]||''}`,row[2]||'—',row[3]||'—',row[4]||'—',row[5]||'—',row[6]||'—',''];
-    const safe = row[2]!=='' && Number(row[2])>19.5 && Number(row[2])<23 && Number(row[3])<10 && Number(row[4])<5 && Number(row[5])<25;
-    vals[6] = row[1] ? (safe ? 'Dentro dos limites' : 'Fora dos limites') : 'Não realizado';
-    vals.forEach((v,i)=>{ctx.strokeRect(cx,y,cols[i],64); drawWrappedText(ctx,String(v).replace('\n',' '),cx+6,y+10,cols[i]-12,17,3); cx+=cols[i];});
-    y+=64;
+    const vals=[`${label} ${f[`${prefix}_hora`]||''}`, f[`${prefix}_o2`]||'—', f[`${prefix}_lie`]||'—', f[`${prefix}_h2s`]||'—', f[`${prefix}_co`]||'—', f[`${prefix}_obs`]||'—', pdfGasSituation(f, prefix)];
+    vals.forEach((v,i)=>{ctx.strokeRect(cx,y,cols[i],56); drawWrappedText(ctx,String(v),cx+6,y+9,cols[i]-12,17,3); cx+=cols[i];});
+    y+=56;
   }
-  y+=18;
-  ctx.font='700 17px Arial, sans-serif'; ctx.fillText('NOTAS DE ORIENTAÇÃO',x,y); y+=28;
-  ctx.font='14px Arial, sans-serif';
+  y+=10;
+  ctx.font='700 14px Arial, sans-serif'; ctx.fillText('Detector de gases:', x, y);
+  ctx.font='14px Arial, sans-serif'; ctx.fillText(`nº de série/patrimônio ${f.detectorId || '—'} • calibração válida até ${formatDate(f.detectorCalibracao) || '—'}`, x + 150, y);
+  if (f.gasObservacoes) { y += 22; ctx.font='700 14px Arial, sans-serif'; ctx.fillText('Observações das medições:', x, y); ctx.font='14px Arial, sans-serif'; y = drawWrappedText(ctx, f.gasObservacoes, x + 205, y, full - 205, 18, 2) - 18; }
+  y += 34;
+
+  // Justificativas dos itens N/A (antes só no JSON).
+  const naItems = (record.payload?.checklist || []).filter(c => c.answer === 'NA');
+  const proofBoxH = 176;
+  const notesH = 236;
+  const limitY = PDF_PAGE_HEIGHT - proofBoxH - notesH - 40;
+  let pendingNa = naItems.slice();
+  const drawNaBlock = (context, startY, maxY, title) => {
+    let yy = startY;
+    context.font='700 16px Arial, sans-serif'; context.fillText(title, x, yy); yy += 26;
+    while (pendingNa.length) {
+      const c = pendingNa[0];
+      context.font='13px Arial, sans-serif';
+      const text = `${c.number} — ${c.item}  •  Justificativa: ${c.justification || '—'}`;
+      const needed = canvasLines(context, text, full - 20).slice(0, 3).length * 17 + 6;
+      if (yy + needed > maxY) break;
+      context.fillStyle='#111';
+      yy = drawWrappedText(context, text, x + 10, yy, full - 20, 17, 3) + 6;
+      pendingNa.shift();
+    }
+    return yy;
+  };
+  if (naItems.length) y = drawNaBlock(ctx, y, limitY, `JUSTIFICATIVAS DOS ITENS N/A (${naItems.length})`) + 10;
+
+  ctx.font='700 16px Arial, sans-serif'; ctx.fillText('NOTAS DE ORIENTAÇÃO',x,y); y+=24;
+  ctx.font='13px Arial, sans-serif';
   const notes=[
     '1. O acesso ao espaço confinado só deve ocorrer após a emissão e endosso da PET.',
     '2. A PET deve ser encerrada ou cancelada ao término do serviço, condição não prevista, interrupção ou troca de equipe.',
@@ -313,22 +364,40 @@ async function buildPdfAtmospherePage(record) {
     '6. Compete ao supervisor emitir, encerrar/cancelar, realizar testes, conferir equipamentos e checar procedimentos.',
     '7. O portador do monitor de gás deve ser o último a sair; em caso de alarme, todos devem abandonar o local imediatamente.'
   ];
-  for (const note of notes) y=drawWrappedText(ctx,note,x,y,full,20,2)+6;
-  y+=8;
+  for (const note of notes) y=drawWrappedText(ctx,note,x,y,full,17,2)+3;
+  y+=6;
+  const ciencia = f.declaracaoCiencia ? `Confirmada pelo emissor ${record.payload?.issuedBy?.name || ''} em ${formatDateTime(record.integrity?.finalizedAt)}.` : 'NÃO confirmada.';
+  ctx.font='700 14px Arial, sans-serif'; ctx.fillText('DECLARAÇÃO DE CIÊNCIA:', x, y);
+  ctx.font='14px Arial, sans-serif'; drawWrappedText(ctx, `As informações foram conferidas e a equipe tomou ciência das orientações da PET. ${ciencia}`, x + 200, y, full - 200, 18, 2);
+  y += 42;
+
   const proof=latestPdfProof(record);
   const geo=proof?.geolocation?.available ? `${Number(proof.geolocation.latitude).toFixed(6)}, ${Number(proof.geolocation.longitude).toFixed(6)} ± ${Math.round(proof.geolocation.accuracyMeters||0)} m` : 'não obtida';
-  ctx.fillStyle='#f5f7fa'; ctx.fillRect(x,y,full,190); ctx.strokeStyle='#555'; ctx.strokeRect(x,y,full,190); ctx.fillStyle='#111';
-  ctx.font='700 15px Arial, sans-serif'; ctx.fillText('REGISTRO DE AUTENTICAÇÃO E INTEGRIDADE',x+10,y+10);
+  const boxY = Math.max(y, PDF_PAGE_HEIGHT - proofBoxH - 24);
+  ctx.fillStyle='#f5f7fa'; ctx.fillRect(x,boxY,full,proofBoxH); ctx.strokeStyle='#555'; ctx.strokeRect(x,boxY,full,proofBoxH); ctx.fillStyle='#111';
+  ctx.font='700 15px Arial, sans-serif'; ctx.fillText('REGISTRO DE AUTENTICAÇÃO E INTEGRIDADE',x+10,boxY+10);
   ctx.font='12px Arial, sans-serif';
   const proofText=[
-    `PET: ${f.petNumero || ''} • Código: ${record.recordId || ''}`,
+    `PET: ${f.petNumero || ''} • Código: ${record.recordId || ''} • Emitida por: ${record.payload?.issuedBy?.name || ''} (${record.payload?.issuedBy?.matricula || ''})`,
     `Gerado em: ${formatDateTime(proof?.generatedAt || record.integrity?.finalizedAt)} • IP observado: ${proof?.publicIp || 'não obtido'} • Geolocalização: ${geo}`,
     `Hash SHA-256 do conteúdo: ${record.integrity?.payloadHashSha256 || ''}`,
     `Código do dispositivo: ${record.integrity?.supervisorCryptographicSignature?.publicKeyHash || ''}`,
     'A validação oficial deve utilizar este PDF e o arquivo de validação da PET (JSON) correspondente.'
   ];
-  let py=y+38; for(const line of proofText) py=drawWrappedText(ctx,line,x+10,py,full-20,16,2)+4;
-  return canvas;
+  let py=boxY+36; for(const line of proofText) py=drawWrappedText(ctx,line,x+10,py,full-20,16,2)+4;
+  if (pendingNa.length) ctx.fillText('Justificativas N/A continuam na página seguinte.', x, boxY - 18);
+
+  // Página extra apenas se as justificativas não couberem.
+  while (pendingNa.length) {
+    const extra = createPdfCanvas();
+    await drawPdfHeader(extra.ctx, 'PET — JUSTIFICATIVAS DOS ITENS N/A (CONTINUAÇÃO)');
+    const before = pendingNa.length;
+    drawNaBlock(extra.ctx, 140, PDF_PAGE_HEIGHT - 60, 'JUSTIFICATIVAS DOS ITENS N/A (continuação)');
+    if (pendingNa.length === before) pendingNa.shift();
+    extra.ctx.font='11px Arial, sans-serif'; extra.ctx.fillText(`PET ${f.petNumero || ''}`, PDF_MARGIN, PDF_PAGE_HEIGHT-30);
+    pages.push(extra.canvas);
+  }
+  return pages;
 }
 
 async function buildPdfParticipantPages(record) {
@@ -406,7 +475,7 @@ function buildPdfFromJpegPages(jpegPages) {
 
 /** Cria o PDF oficial sem baixar código de terceiros em tempo de execução. */
 async function createPdfFile(record) {
-  const canvases=[await buildPdfChecklistPage(record), await buildPdfAtmospherePage(record), ...(await buildPdfParticipantPages(record))];
+  const canvases=[await buildPdfChecklistPage(record), ...(await buildPdfAtmospherePages(record)), ...(await buildPdfParticipantPages(record))];
   if (!canvases.length) throw new Error('Nenhuma página foi gerada para o PDF.');
   const jpegPages=[];
   for(const canvas of canvases) jpegPages.push(await canvasToJpegBytes(canvas));
@@ -415,144 +484,46 @@ async function createPdfFile(record) {
 }
 
 /**
- * Atualiza o painel de integridade exibido após a finalização.
- * Ativação: finalização da PET e geração de prova de PDF.
- * O que faz: mostra recordId, hash do payload, algoritmo, hash da chave pública e, se
- * existir, os dados da última prova de geração do PDF.
+ * Preenche os detalhes técnicos da tela de conclusão (código, hashes, prova do PDF).
+ * Quando: ao mostrar a PET registrada.
  */
 function renderIntegrity(record) {
   const panel = $('#integrityPanel');
+  if (!panel || !record?.integrity) return;
   const proof = latestPdfProof(record);
-  const proofText = proof ? `<br><strong>Última geração de PDF:</strong><br>
-    Data/hora: ${formatDateTime(proof.generatedAt)}<br>
-    IP: ${escapeHtml(proof.publicIp || 'não obtido')}<br>
-    Geolocalização: ${proof.geolocation?.available ? `${escapeHtml(String(proof.geolocation.latitude))}, ${escapeHtml(String(proof.geolocation.longitude))} ± ${escapeHtml(String(Math.round(proof.geolocation.accuracyMeters || 0)))} m` : escapeHtml(proof.geolocation?.error || 'não obtida')}<br>
-    <details class="advanced-details"><summary>Detalhes técnicos</summary><code>${escapeHtml(proof.pdfProofHashSha256)}</code></details>` : '';
-  panel.classList.remove('hidden');
-  const standard = record.payload?.proofStandard || {};
-  panel.innerHTML = `<strong>PET finalizada:</strong> ${escapeHtml(record.payload?.fields?.petNumero || record.recordId)}<br>
-    <strong>Código de conferência:</strong> ${escapeHtml(record.recordId)}<br>
-    <strong>Finalizado em:</strong> ${formatDateTime(record.integrity.finalizedAt)}${proofText}
-    <details class="advanced-details"><summary>Detalhes técnicos do arquivo de validação</summary>
-      <strong>Padrão:</strong> ${escapeHtml(standard.validationProfile || VALIDATION_PROFILE)}<br>
-      <strong>Normalização:</strong> ${escapeHtml(standard.canonicalizationAlgorithm || CANONICALIZATION_ALGORITHM)}<br>
-      <strong>Código técnico:</strong><br><code>${escapeHtml(record.integrity.payloadHashSha256)}</code><br>
-      <strong>Assinatura técnica:</strong> ${escapeHtml(record.integrity.supervisorCryptographicSignature.algorithm)}<br>
-      <strong>Dispositivo:</strong> ${escapeHtml(record.integrity.supervisorCryptographicSignature.publicKeyHash)}
-    </details>`;
+  const geo = proof?.geolocation?.available
+    ? `${Number(proof.geolocation.latitude).toFixed(6)}, ${Number(proof.geolocation.longitude).toFixed(6)} ± ${Math.round(proof.geolocation.accuracyMeters || 0)} m`
+    : (proof?.geolocation?.error || 'não obtida');
+  panel.innerHTML = `<p><strong>Código de conferência:</strong> ${escapeHtml(record.recordId)}</p>
+    <p><strong>Finalizada em:</strong> ${escapeHtml(formatDateTime(record.integrity.finalizedAt))}</p>
+    ${proof ? `<p><strong>IP observado:</strong> ${escapeHtml(proof.publicIp || 'não obtido')} · <strong>Localização:</strong> ${escapeHtml(geo)}</p>` : ''}
+    <p><strong>Código técnico (hash):</strong><br><code>${escapeHtml(record.integrity.payloadHashSha256)}</code></p>
+    <p><strong>Aparelho:</strong><br><code>${escapeHtml(record.integrity.supervisorCryptographicSignature?.publicKeyHash || '')}</code></p>`;
 }
 
 /**
- * Monta o HTML específico para impressão/PDF.
- * Ativação: finalização da PET e antes de imprimir/gerar PDF.
- * O que faz: cria duas páginas A4 paisagem com identificação, checklist, gases, fotos,
- * assinaturas, notas e dados de integridade/prova.
- */
-function renderPrintArea(record) {
-  const area = $('#printArea');
-  area.classList.remove('hidden');
-  const p = record.payload;
-  const f = p.fields;
-  const checkRows = p.checklist.map(c => `<tr>
-    <td class="center">${escapeHtml(c.number)}</td><td>${escapeHtml(c.item)}</td>
-    <td class="center">${c.answer === 'S' ? 'X' : ''}</td>
-    <td class="center">${c.answer === 'N' ? 'X' : ''}</td>
-    <td class="center">${c.answer === 'NA' ? 'X' : ''}</td>
-  </tr>`).join('');
-  const prosRows = p.professionals.filter(pro => pro.nome || pro.matricula || pro.required).map(pro => `<tr>
-    <td><strong>${escapeHtml(pro.role)}</strong><br>${escapeHtml(pro.nome || '')}</td>
-    <td>${escapeHtml(pro.matricula || '')}</td>
-    <td>${pro.photoDataUrl ? `<img class="print-photo" src="${pro.photoDataUrl}" alt="Foto" />` : ''}<small>${pro.photoCapturedAt ? 'Foto: ' + formatDateTime(pro.photoCapturedAt) : ''}</small></td>
-    <td>${pro.signatureDataUrl ? `<img class="print-sig" src="${pro.signatureDataUrl}" alt="Assinatura" />` : ''}<small>${pro.signedAt ? 'Assinado em ' + formatDateTime(pro.signedAt) : ''}</small></td>
-  </tr>`).join('');
-  const gasRows = [
-    ['1-Teste Inicial/Hora', f.gas_inicial_hora, f.gas_inicial_o2, f.gas_inicial_lie, f.gas_inicial_h2s, f.gas_inicial_co, f.gas_inicial_obs],
-    ['2-Teste Após Ventilação/Hora', f.gas_ventilacao_hora, f.gas_ventilacao_o2, f.gas_ventilacao_lie, f.gas_ventilacao_h2s, f.gas_ventilacao_co, f.gas_ventilacao_obs]
-  ].map(r => `<tr><td>${escapeHtml(r[0])}<br>${escapeHtml(r[1] || '')}</td><td class="center">${escapeHtml(r[2] || '')}</td><td class="center">${escapeHtml(r[3] || '')}</td><td class="center">H₂S: ${escapeHtml(r[4] || '')}<br>CO: ${escapeHtml(r[5] || '')}</td><td>${escapeHtml(r[6] || '')}</td></tr>`).join('');
-  const pdfProof = latestPdfProof(record);
-  const geoText = pdfProof?.geolocation?.available
-    ? `${Number(pdfProof.geolocation.latitude).toFixed(6)}, ${Number(pdfProof.geolocation.longitude).toFixed(6)} ± ${Math.round(pdfProof.geolocation.accuracyMeters || 0)} m`
-    : `Não obtida${pdfProof?.geolocation?.error ? ' — ' + pdfProof.geolocation.error : ''}`;
-  const pdfProofHtml = pdfProof ? `<strong>Prova de geração do PDF:</strong> ${formatDateTime(pdfProof.generatedAt)} • <strong>IP:</strong> ${escapeHtml(pdfProof.publicIp || 'não obtido')} • <strong>Geolocalização:</strong> ${escapeHtml(geoText)} • <strong>Hash da prova:</strong> ${escapeHtml(pdfProof.pdfProofHashSha256)}` : '<strong>Prova de geração do PDF:</strong> não registrada.';
-  const validationCode = `${record.recordId}-${record.integrity.payloadHashSha256.slice(0, 12).toUpperCase()}`;
-  const validationInfoHtml = `<strong>Código de conferência:</strong> ${escapeHtml(validationCode)} • <strong>Perfil:</strong> ${escapeHtml(p.proofStandard?.validationProfile || VALIDATION_PROFILE)} • <strong>Hash:</strong> ${escapeHtml(p.proofStandard?.hashAlgorithm || HASH_ALGORITHM)} • <strong>Assinatura:</strong> ${escapeHtml(p.proofStandard?.signatureAlgorithm || SIGNATURE_ALGORITHM)} • <strong>JSON canônico:</strong> ${escapeHtml(p.proofStandard?.canonicalizationAlgorithm || CANONICALIZATION_ALGORITHM)} • <strong>Validação:</strong> exige o arquivo de validação da PET (JSON) correspondente.`;
-
-  area.innerHTML = `
-    <div class="print-page">
-      <div class="print-header">
-        <div class="print-logo"><img class="print-dmae-logo" src="logo-dmae-2026.png" alt="DMAE" /><small>Departamento Municipal de Água e Esgoto</small></div>
-        <div class="print-title"><h1>PET - PERMISSÃO DE ENTRADA E TRABALHO<br>ESPAÇO CONFINADO<br>NBR14787/NR33</h1></div>
-        <div class="print-rev">Revisão: 00/2025<br>Mod.: 01/2025<br>PET Digital</div>
-      </div>
-      <div class="print-grid">
-        <div class="print-cell"><strong>1-NOME DA UNIDADE:</strong>${escapeHtml(f.unidade)}</div>
-        <div class="print-cell"><strong>2-Nº DA PET:</strong>${escapeHtml(f.petNumero)}</div>
-        <div class="print-cell"><strong>3-DATA:</strong>${formatDate(f.data)}</div>
-        <div class="print-cell wide"><strong>4-LOCAL DO ESPAÇO CONFINADO:</strong>${escapeHtml(f.local)}</div>
-        <div class="print-cell"><strong>5-HORA DA EMISSÃO:</strong>${escapeHtml(f.horaEmissao)}</div>
-        <div class="print-cell"><strong>6-HORA DO TÉRMINO:</strong>${escapeHtml(f.horaTermino)}</div>
-        <div class="print-cell full"><strong>7-TRABALHO A SER REALIZADO:</strong>${escapeHtml(f.trabalho)}</div>
-        <div class="print-cell wide"><strong>8-SUPERVISOR DE ENTRADA:</strong>${escapeHtml(f.supervisorEntrada)}</div>
-        <div class="print-cell wide"><strong>9-EQUIPE DE SALVAMENTO:</strong>${escapeHtml(f.equipeSalvamento)} — Tel.: ${escapeHtml(f.telefoneSalvamento)}</div>
-      </div>
-      <table class="print-table">
-        <thead><tr><th>Nº</th><th>ITENS A SEREM VERIFICADOS ANTES DA EMISSÃO DA PET</th><th>SIM</th><th>NÃO</th><th>N/A</th></tr></thead>
-        <tbody>${checkRows}</tbody>
-      </table>
-      <div class="print-observacoes"><strong>Observações:</strong> ${escapeHtml(f.observacoes || '')}</div>
-      <div class="print-integrity"><strong>Registro:</strong> ${record.recordId} • <strong>Hash SHA-256:</strong> ${record.integrity.payloadHashSha256} • <strong>Assinado:</strong> ${formatDateTime(record.integrity.finalizedAt)}<br>${validationInfoHtml}<br>${pdfProofHtml}</div>
-    </div>
-    <div class="print-page">
-      <div class="print-section-title">MEDIÇÕES DE GASES PERIGOSOS</div>
-      <table class="print-table">
-        <thead><tr><th></th><th>Oxigênio (%)<br>(19,5% &lt; O₂ &lt; 23%)</th><th>Inflamável (%LIE)<br>(&lt; 10%)</th><th>Gás/Tóxico (ppm)<br>H₂S &lt; 5 ppm / CO &lt; 25 ppm</th><th>Obs.</th></tr></thead>
-        <tbody>${gasRows}</tbody>
-      </table>
-      <div class="print-section-title">RELAÇÃO DE PROFISSIONAIS</div>
-      <table class="print-table">
-        <thead><tr><th>Profissional</th><th>Matrícula</th><th>Foto</th><th>Assinatura</th></tr></thead>
-        <tbody>${prosRows}</tbody>
-      </table>
-      <div class="print-observacoes"><strong>Legenda:</strong> S – Sim &nbsp;&nbsp; N – Não &nbsp;&nbsp; N/A – Não se aplica</div>
-      <div class="print-observacoes">
-        <strong>Nota de Orientação</strong><br>
-        1- O acesso só deve ocorrer após a emissão e endosso da PET. 2- A PET deve ser encerrada ou cancelada ao término, condição não prevista, interrupção ou troca de equipe. 3- A PET é válida somente para cada entrada. 4- O vigia não pode realizar outras tarefas. 5- Não é permitido trabalho individual ou isolado. 6- O supervisor emite, encerra/cancela, testa, confere equipamentos e checa procedimentos. 7- O portador do monitor de gás deve ser o último a sair. 8- Em caso de alarme, abandonar imediatamente o local.
-      </div>
-      <div class="print-integrity"><strong>Assinatura criptográfica ECDSA-P256:</strong> ${escapeHtml(record.integrity.supervisorCryptographicSignature.signatureBase64)}<br><strong>Hash da chave pública:</strong> ${escapeHtml(record.integrity.supervisorCryptographicSignature.publicKeyHash)}<br>${validationInfoHtml}<br>${pdfProofHtml}</div>
-    </div>`;
-}
-
-/**
- * Salva o rascunho atual no dispositivo.
- * Ativação: botão 'Salvar rascunho' e autosave.
- * O que faz: serializa campos e profissionais e grava em `localStorage` para retomada.
+ * Salva o rascunho atual no aparelho (separado por usuário).
+ * Quando: automaticamente, a cada alteração (com pequeno atraso).
  */
 function saveDraft() {
-  const draft = {
-    savedAt: new Date().toISOString(),
-    fields: serializeForm(),
-    people: collectPeople()
-  };
   const key = currentDraftKey();
   if (!key) return;
-  return safeLocalStorageSet(key, JSON.stringify(draft), 'o rascunho');
+  // PET já registrada: o formulário na memória não é mais rascunho (evita reabrir uma PET emitida).
+  if (finalizedRecord?.serverRegistration) return;
+  const draft = { savedAt: new Date().toISOString(), appVersion: APP_VERSION, fields: serializeForm(), people: collectPeople() };
+  const saved = safeLocalStorageSet(key, JSON.stringify(draft), 'o rascunho');
+  if (saved) setDraftStatus(nowTime());
+  return saved;
 }
 
-/**
- * Tenta salvar rascunho silenciosamente.
- * Ativação: eventos de input/change, alteração de foto, assinatura e lista de pessoas.
- * O que faz: chama `saveDraft()` sem interromper a tela; a rotina de armazenamento
- * devolve `false` e exibe aviso visível quando a cota local estiver cheia.
- */
+/** Tenta salvar o rascunho sem interromper a tela. */
 function autoSaveDraft() {
   try { saveDraft(); } catch (err) { console.warn('Não foi possível salvar rascunho', err); }
 }
 
 /**
- * Restaura rascunho salvo no localStorage.
- * Ativação: inicialização do app.
- * O que faz: lê JSON do rascunho, restaura campos e profissionais; se estiver corrompido,
- * ignora com aviso no console.
+ * Restaura o rascunho do usuário.
+ * Compatível com rascunhos da v1.1.6 (campos com o mesmo nome; a ordem da equipe é refeita).
  */
 function loadDraft() {
   const key = currentDraftKey();
@@ -562,12 +533,13 @@ function loadDraft() {
   try {
     const draft = JSON.parse(raw);
     restoreForm(draft.fields || {});
-    checklistItems.forEach((_, idx) => updateNaJustificationVisibility(String(idx + 1).padStart(2, '0')));
     if (Array.isArray(draft.people) && draft.people.length) {
-      people = draft.people.map((p, idx) => ({ id: crypto.randomUUID ? crypto.randomUUID() : 'p-' + idx, ...p }));
+      people = draft.people.map((p, idx) => ({ id: crypto.randomUUID ? crypto.randomUUID() : 'p-' + idx, ...p, _dirtySignature: undefined }));
       reindexPeople();
       renderPeople();
     }
+    refreshFormDerivedUi();
+    if (draft.savedAt) setDraftStatus(new Date(draft.savedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }));
     return true;
   } catch (err) {
     console.warn('Rascunho inválido', err);
@@ -643,7 +615,8 @@ function recordForLocalStorage(record) {
     },
     output: record.output,
     serverRegistration: record.serverRegistration,
-    pendingOfficialRegistration: Boolean(record.pendingOfficialRegistration)
+    pendingOfficialRegistration: Boolean(record.pendingOfficialRegistration),
+    discardedAt: record.discardedAt || null
   };
 }
 
@@ -691,67 +664,78 @@ function getRecords() {
   catch { return []; }
 }
 
+/** Situação de um registro local, em termos que o usuário entende. */
+function recordStatus(r) {
+  if (r.serverRegistration) return { key: 'reg', text: 'Registrada', cls: 'status-ok' };
+  if (r.discardedAt) return { key: 'discarded', text: 'Cancelada antes do registro', cls: 'status-neutral' };
+  if (r.pendingOfficialRegistration && r.output?.pdfHashSha256) return { key: 'pend', text: 'Envio pendente', cls: 'status-warn' };
+  return { key: 'incomplete', text: 'Não concluída', cls: 'status-neutral' };
+}
+
 /**
- * Renderiza a lista de PETs finalizadas neste dispositivo.
- * Ativação: abrir aba Registros ou clicar em “Atualizar lista”.
- * O que faz: monta cartões com dados básicos e ações de PDF, arquivo de validação da PET (JSON),
- * registro no sistema e exclusão local.
+ * Lista "Minhas PETs" deste aparelho.
+ * Registrada: enviar PDF / enviar validação (e mais opções). Pendente: repetir envio.
+ * Cancelada antes do registro: apenas referência (sem reenvio).
  */
 function renderRecords() {
   const box = $('#recordsList');
+  if (!box) return;
   const records = getRecords();
-  if (!records.length) {
-    box.innerHTML = '<p class="hint">Nenhum registro finalizado neste dispositivo.</p>';
+  if (!records.length) { box.innerHTML = '<p class="hint">Nenhuma PET emitida neste aparelho.</p>'; return; }
+  box.innerHTML = records.map((r, idx) => {
+    const st = recordStatus(r);
+    const f = r.payload?.fields || {};
+    const when = r.serverRegistration?.server_received_at || r.integrity?.finalizedAt;
+    const actions = st.key === 'pend'
+      ? `<button type="button" class="btn primary small block" data-record-action="registerServer" data-index="${idx}">Repetir envio ao sistema</button>`
+      : st.key === 'reg'
+        ? `<div class="two-cols">
+            <button type="button" class="btn secondary small" data-record-action="sharePdf" data-index="${idx}">Enviar PDF</button>
+            <button type="button" class="btn secondary small" data-record-action="shareJson" data-index="${idx}">Enviar validação</button>
+          </div>
+          <details class="details"><summary>Mais opções</summary><div class="actions-row">
+            <button type="button" class="btn secondary small" data-record-action="print" data-index="${idx}">Abrir PDF</button>
+            <button type="button" class="btn secondary small" data-record-action="export" data-index="${idx}">Salvar validação</button>
+            <button type="button" class="btn danger-outline small" data-record-action="delete" data-index="${idx}">Excluir deste aparelho</button>
+          </div></details>`
+        : `<button type="button" class="link danger-text" data-record-action="delete" data-index="${idx}">Excluir deste aparelho</button>`;
+    return `<div class="list-card">
+      <div class="row-between"><span class="title">${escapeHtml(f.petNumero || r.recordId)}</span><span class="status-chip ${st.cls}">${escapeHtml(st.text)}</span></div>
+      <span class="sub">${escapeHtml(f.local || '')}</span>
+      <span class="meta">${escapeHtml(formatDateTime(when))}</span>
+      ${actions}
+    </div>`;
+  }).join('');
+}
+
+/** Ações dos cartões de Minhas PETs (um único ouvinte, ligado em bindEvents). */
+async function handleRecordAction(event) {
+  const btn = event.target.closest('[data-record-action]');
+  if (!btn) return;
+  const compactRecord = getRecords()[Number(btn.dataset.index)];
+  if (!compactRecord) return;
+  const action = btn.dataset.recordAction;
+  if (action === 'delete') {
+    const ok = await askConfirm('Excluir esta PET apenas deste aparelho? O registro no sistema não é afetado.', { okLabel: 'Excluir', danger: true });
+    if (!ok) return;
+    const updated = getRecords().filter(r => r.recordId !== compactRecord.recordId);
+    const key = currentRecordsKey();
+    if (key) safeLocalStorageSet(key, JSON.stringify(updated), 'o histórico local');
+    await deleteOfficialFiles(compactRecord.recordId);
+    if (readPendingPointer()?.recordId === compactRecord.recordId) clearPendingPointer();
+    renderRecords();
     return;
   }
-  box.innerHTML = records.map((r, idx) => `<div class="record-item">
-    <div><strong>${escapeHtml(r.payload?.fields?.petNumero || r.recordId)}</strong><br>
-    Local: ${escapeHtml(r.payload?.fields?.local || '')}<br>
-    Finalizado: ${formatDateTime(r.integrity?.finalizedAt)}<br>
-    Situação: ${r.serverRegistration ? 'registrado no sistema' : 'pendente de registro no sistema'}
-    <details class="advanced-details"><summary>Detalhes técnicos</summary><small class="record-hash">Código: ${escapeHtml(r.integrity?.payloadHashSha256 || '')}</small></details></div>
-    <div class="actions">
-      <button type="button" class="small secondary" data-record-action="print" data-index="${idx}">Abrir PDF</button>
-      <button type="button" class="small secondary" data-record-action="sharePdf" data-index="${idx}">Compartilhar PDF</button>
-      <button type="button" class="small secondary" data-record-action="export" data-index="${idx}">Salvar arquivo de validação</button>
-      <button type="button" class="small secondary" data-record-action="shareJson" data-index="${idx}">Compartilhar arquivo de validação</button>
-      ${r.pendingOfficialRegistration && r.output?.pdfHashSha256 ? `<button type="button" class="small ghost" data-record-action="registerServer" data-index="${idx}">Repetir registro pendente</button>` : ''}
-      <button type="button" class="small danger ghost" data-record-action="delete" data-index="${idx}">Excluir local</button>
-    </div>
-  </div>`).join('');
-  box.onclick = async event => {
-    const btn = event.target.closest('[data-record-action]');
-    if (!btn) return;
-    const compactRecord = getRecords()[Number(btn.dataset.index)];
-    if (!compactRecord) return;
-    const rec = await hydrateRecord(compactRecord);
-    if (!rec) return alert('Os arquivos completos deste registro não estão mais disponíveis neste aparelho.');
-    if (btn.dataset.recordAction === 'print') {
-      finalizedRecord = rec;
-      showTab('formTab');
-      await openOfficialPdf(rec, btn);
-    }
-    if (btn.dataset.recordAction === 'sharePdf') {
-      finalizedRecord = rec;
-      await sharePdfRecord(rec, btn);
-    }
-    if (btn.dataset.recordAction === 'export') {
-      finalizedRecord = rec;
-      const ready = await ensureRecordReadyForOutput(rec, 'salvar o arquivo de validação da PET (JSON)');
-      if (ready) { const files = await readOfficialFiles(rec); downloadBlob(new Blob([files.jsonText], { type: 'application/json' }), files.jsonFilename || jsonFilename(rec)); }
-    }
-    if (btn.dataset.recordAction === 'shareJson') await shareJsonRecord(rec, btn);
-    if (btn.dataset.recordAction === 'registerServer') await retryPendingRecordRegistration(rec, btn);
-    if (btn.dataset.recordAction === 'delete') {
-      if (!confirm('Excluir este registro apenas deste dispositivo?')) return;
-      const updated = getRecords();
-      updated.splice(Number(btn.dataset.index), 1);
-      const key = currentRecordsKey();
-      if (key) safeLocalStorageSet(key, JSON.stringify(updated), 'o histórico local');
-      await deleteOfficialFiles(rec.recordId);
-      renderRecords();
-    }
-  };
+  const rec = await hydrateRecord(compactRecord);
+  if (!rec) return notify('Os arquivos completos desta PET não estão mais neste aparelho.', 'bad');
+  if (action === 'print') await openOfficialPdf(rec, btn);
+  if (action === 'sharePdf') await sharePdfRecord(rec, btn);
+  if (action === 'shareJson') await shareJsonRecord(rec, btn);
+  if (action === 'export' && await ensureRecordReadyForOutput(rec)) {
+    const files = await readOfficialFiles(rec);
+    downloadBlob(new Blob([files.jsonText], { type: 'application/json' }), files.jsonFilename || jsonFilename(rec));
+  }
+  if (action === 'registerServer') await retryPendingRecordRegistration(rec, btn);
 }
 
 /**
@@ -762,9 +746,10 @@ async function verifyFiles() {
   const jsonFile = $('#verifyJsonFile')?.files?.[0];
   const pdfFile = $('#verifyPdfFile')?.files?.[0];
   const result = $('#verifyResult');
+  result.classList.remove('hidden');
   if (!jsonFile || !pdfFile) {
-    result.className = 'validation-box warn';
-    result.textContent = 'Selecione o PDF oficial e o arquivo de validação da PET (JSON) correspondentes.';
+    result.className = 'alert alert-warn';
+    result.textContent = 'Selecione o PDF e o arquivo de validação (JSON) correspondentes.';
     return;
   }
   try {
@@ -774,7 +759,7 @@ async function verifyFiles() {
     const jsonHash = await sha256Hex(text);
     const pdfHash = await sha256BlobHex(pdfFile);
     const record = JSON.parse(text);
-    if (!record.payload || !record.integrity || !record.fileIntegrity) throw new Error('Arquivo não é um arquivo de validação oficial v1.1.6 completo.');
+    if (!record.payload || !record.integrity || !record.fileIntegrity) throw new Error('O arquivo selecionado não é um arquivo de validação completo da PET Digital.');
     if (pdfHash !== record.fileIntegrity.pdfSha256) throw new Error('O PDF selecionado não corresponde ao hash gravado no arquivo de validação.');
 
     const standardCheck = validateSupportedProofStandard(record.payload.proofStandard, 'PET');
@@ -796,7 +781,7 @@ async function verifyFiles() {
       jsonText: text
     }});
     const allOk = localOk && server.valid === true;
-    result.className = 'validation-box ' + (allOk ? 'ok' : 'bad');
+    result.className = 'alert ' + (allOk ? 'alert-ok' : 'alert-bad');
     const technicalText = `Hash do PDF: ${pdfHash}
 Hash do JSON: ${jsonHash}
 Hash do payload: ${recalculated}
@@ -805,9 +790,9 @@ Registro exato no servidor: ${server.found ? 'ENCONTRADO' : 'NÃO ENCONTRADO'}
 Chave autorizada na emissão: ${server.keyAuthorizedAtRegistration ? 'SIM' : 'NÃO'}
 Assinaturas confirmadas no servidor: ${server.signaturesValid ? 'SIM' : 'NÃO'}
 Emissor: ${server.issuer ? `${server.issuer.name} (${server.issuer.matricula})` : 'NÃO CONFIRMADO'}`;
-    result.innerHTML = `<strong>${allOk ? 'Documento válido: PDF, arquivo de validação, emissor e dispositivo confirmados.' : 'Documento não validado.'}</strong><br>${escapeHtml(server.message || server.reason || '')}<details class="advanced-details"><summary>Detalhes técnicos</summary><pre>${escapeHtml(technicalText)}</pre></details>`;
+    result.innerHTML = `<strong>${allOk ? 'Documento válido: PDF, arquivo de validação, emissor e aparelho confirmados.' : 'Documento não validado.'}</strong><span>${escapeHtml(server.message || server.reason || '')}</span><details class="details"><summary>Detalhes técnicos</summary><pre>${escapeHtml(technicalText)}</pre></details>`;
   } catch (err) {
-    result.className = 'validation-box bad';
+    result.className = 'alert alert-bad';
     result.textContent = 'Não foi possível validar oficialmente: ' + err.message;
   }
 }
@@ -831,12 +816,13 @@ async function exportPublicKey() {
  */
 async function updateKeyStatus() {
   const box = $('#keyStatus');
+  if (!box) return;
   const key = await readLocalKeyPair();
   if (!key) {
-    box.innerHTML = '<p class="hint">A proteção local ainda não foi criada. Ela será criada automaticamente quando você clicar em “Configurar e solicitar autorização”.</p>';
+    box.innerHTML = '<p class="hint">A proteção local ainda não foi criada. Ela é criada automaticamente ao solicitar a autorização deste aparelho.</p>';
     return;
   }
-  box.innerHTML = `<p><strong>Dispositivo preparado:</strong> sim<br><strong>Armazenamento:</strong> ${escapeHtml(key.storage || 'local seguro do navegador')}<br><strong>Criado em:</strong> ${formatDateTime(key.createdAt)}</p><details class="advanced-details"><summary>Detalhes técnicos</summary><strong>Algoritmo:</strong> ${escapeHtml(key.algorithm)}<br><strong>Código do dispositivo:</strong> <span class="hash-text">${escapeHtml(key.publicKeyHash)}</span><pre>${escapeHtml(JSON.stringify({ publicKeyHash: key.publicKeyHash, publicKey: key.publicKey }, null, 2))}</pre></details>`;
+  box.innerHTML = `<p><strong>Proteção local:</strong> criada em ${escapeHtml(formatDateTime(key.createdAt))}<br><strong>Algoritmo:</strong> ${escapeHtml(key.algorithm)}<br><strong>Código do aparelho:</strong><br><code>${escapeHtml(key.publicKeyHash)}</code></p>`;
 }
 
 /**
@@ -893,7 +879,7 @@ async function shareFilesOrDownload(files, title, text) {
     return;
   }
   files.forEach(file => downloadBlob(file, file.name));
-  alert('Este navegador não permite compartilhar arquivos diretamente. O arquivo foi baixado para envio manual.');
+  notify('Este navegador não permite compartilhar arquivos diretamente. O arquivo foi baixado para envio manual.', 'info', 6000);
 }
 
 /**
@@ -999,24 +985,30 @@ function safeFilename(value) {
 
 /**
  * Inicializa o aplicativo após o carregamento do DOM.
- * Ativação: evento `DOMContentLoaded`.
- * O que faz: renderiza checklist e equipe, registra eventos, preenche data/hora, restaura
- * rascunho, atualiza status de chave e ativa o Service Worker.
+ * v1.2.0: com sessão salva, o app abre direto (mesmo sem internet), carrega o rascunho uma
+ * única vez e só depois reconfirma a sessão no servidor, em segundo plano.
  */
-function init() {
+async function init() {
   renderChecklist();
   resetPeople();
   renderPeople();
   bindEvents();
   showFormStep(1);
   setDefaultDateTime();
+  refreshFormDerivedUi();
   purgeLegacySharedStorage();
-  updateKeyStatus();
   loadAuthState();
+  setOffline(navigator.onLine === false);
   renderAuthState();
-  refreshMe();
-  if (!authToken()) setTimeout(() => $('#loginMatricula')?.focus(), 100);
+  if (authToken()) {
+    await loadUserWorkspace({ force: true });
+    if (finalizedRecord?.pendingOfficialRegistration) notify('Há uma PET gerada e ainda não registrada. Abra a revisão para repetir o envio.', 'info', 6000);
+    refreshMe();
+  } else {
+    setTimeout(() => $('#loginMatricula')?.focus(), 100);
+  }
+  updateKeyStatus();
   registerServiceWorker();
 }
 
-document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded', () => { init().catch(err => { console.error(err); notify('Erro ao iniciar o aplicativo: ' + err.message, 'bad'); }); });
