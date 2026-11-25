@@ -1,6 +1,6 @@
 {
   "name": "pet-digital-testes",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
   "description": "Testes automáticos da PET-Digital NR-33 (Worker + aplicativo), sem Cloudflare.",

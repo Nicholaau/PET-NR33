@@ -1,10 +1,11 @@
 /**
- * Service Worker do PET-Digital NR-33 v1.2.0.
+ * Service Worker do PET-Digital NR-33 v1.3.0.
  *
  * O quê: mantém offline somente os arquivos estáticos do próprio aplicativo.
  * Como: usa uma lista fechada; nunca intercepta API, Authorization, CDN, sessão ou IP.
  * Quando: instalado/atualizado ao acessar o Cloudflare Pages.
  *
+ * v1.3.0: novo nome de cache e o módulo app-gestao.js.
  * v1.2.0: novo nome de cache, para que os celulares baixem a nova interface.
  * v1.1.6:
  * - apaga imediatamente caches anteriores;
@@ -12,13 +13,14 @@
  * - não armazena bibliotecas externas nem respostas autenticadas.
  */
 
-const CACHE_NAME = 'pet-digital-static-v1.2.0';
+const CACHE_NAME = 'pet-digital-static-v1.3.0';
 const APP_SHELL = [
   './',
   './index.html',
   './styles.css',
   './app-core.js',
   './app-system.js',
+  './app-gestao.js',
   './app-form.js',
   './app-output.js',
   './manifest.json',
@@ -31,6 +33,7 @@ const STATIC_PATHS = new Set([
   '/styles.css',
   '/app-core.js',
   '/app-system.js',
+  '/app-gestao.js',
   '/app-form.js',
   '/app-output.js',
   '/manifest.json',

@@ -1,5 +1,5 @@
 /*
- * PET-Digital NR-33 v1.2.0 — estilos.
+ * PET-Digital NR-33 v1.3.0 — estilos.
  * O quê: aparência do aplicativo inteiro, pensada primeiro para celular.
  * Como: tokens de cor no :root, componentes simples (card, field, btn, alert, chip) e telas.
  * Quando: carregado por index.html. A CSP proíbe estilos inline, por isso tudo fica aqui.
@@ -140,9 +140,23 @@ code { font-size: 12px; word-break: break-all; }
 .tabs { position: sticky; top: 56px; z-index: 19; display: flex; gap: 4px; padding: 8px 10px; background: #fff; border-bottom: 1px solid var(--line); overflow-x: auto; }
 .tab-btn { flex: 1 0 auto; min-height: 40px; padding: 0 10px; border: 0; border-radius: 10px; background: transparent; color: var(--text); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; white-space: nowrap; }
 .tab-btn.active { background: var(--navy); color: #fff; }
+.tab-short { display: none; }
+/* v1.3.0: gestor e admin têm cinco abas; no celular elas ficam mais compactas para caber na largura. */
+@media (max-width: 480px) {
+  .tabs.tabs-dense { gap: 2px; padding: 8px 4px; }
+  .tabs.tabs-dense .tab-btn { padding: 0 6px; font-size: 13px; }
+  .tabs.tabs-dense .tab-long { display: none; }
+  .tabs.tabs-dense .tab-short { display: inline; }
+  .tabs.tabs-dense .badge { min-width: 18px; height: 18px; margin-left: 4px; font-size: 11px; }
+}
 .banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; font-size: 14px; font-weight: 500; }
 .banner-warn { background: var(--warn-bg); color: var(--warn-fg); border-bottom: 1px solid var(--warn-line); }
 .banner-info { background: #eef3f9; color: #23395b; border-bottom: 1px solid #cddbeb; }
+.banner-attn { background: #fff4e5; color: #7a3300; border-bottom: 1px solid #f3c98b; font-weight: 600; }
+.banner .btn { flex: none; white-space: nowrap; }
+.topbar .chip { flex: none; white-space: nowrap; }
+.topbar-logo { min-width: 0; flex: 0 1 auto; }
+@media (min-width: 760px) { .banner { padding-left: calc((100% - 720px) / 2 + 14px); padding-right: calc((100% - 720px) / 2 + 14px); } }
 
 .app-shell { max-width: 720px; margin: 0 auto; padding: 14px 14px 28px; }
 .app-shell.with-bar { padding-bottom: calc(var(--bar-h) + 28px + env(safe-area-inset-bottom)); }
@@ -295,6 +309,42 @@ code { font-size: 12px; word-break: break-all; }
 .app-dialog { border: 0; border-radius: 18px; padding: 20px; width: min(92vw, 460px); box-shadow: 0 16px 48px rgba(20, 33, 61, .3); }
 .app-dialog::backdrop { background: rgba(20, 33, 61, .45); }
 .app-dialog p { font-size: 15px; line-height: 1.45; white-space: pre-line; }
+
+/* ---------- v1.3.0: aparelhos, unidades e PETs registradas ---------- */
+.field-hint { font-size: 13px; font-weight: 500; color: var(--muted); }
+.field input[readonly] { background: #f2f5f9; color: var(--text); border-style: dashed; }
+.filter-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.filter-tile { min-height: 64px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 6px 4px; border: 1.5px solid var(--line-strong); border-radius: 12px; background: #fff; color: var(--text); font: inherit; cursor: pointer; }
+.filter-tile b { font-size: 20px; line-height: 1.1; color: var(--navy); }
+.filter-tile span { font-size: 12.5px; font-weight: 600; }
+.filter-tile.active { background: var(--navy); border-color: var(--navy); color: #fff; }
+.filter-tile.active b { color: #fff; }
+.filter-tile.has-pending:not(.active) { border-color: #e8a25c; background: #fff7ed; }
+.filter-tile.has-pending:not(.active) b { color: #c2410c; }
+.filter-tile:focus-visible, .seg-btn:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.pager { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; }
+.pager span { text-align: center; }
+.seg-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); background: #e6ebf1; padding: 4px; border-radius: 12px; gap: 4px; }
+.seg-btn { min-height: 42px; border: 0; border-radius: 9px; background: transparent; color: var(--text); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
+.seg-btn.active { background: #fff; color: var(--navy); box-shadow: 0 1px 3px rgba(20, 33, 61, .15); }
+.check-row { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); cursor: pointer; }
+.check-row input { width: 20px; height: 20px; accent-color: var(--navy); }
+.reason-list { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.field-legend { font-size: 14px; font-weight: 600; color: var(--text); padding: 0; margin-bottom: 4px; }
+.reason-option { display: flex; align-items: center; gap: 10px; min-height: 46px; padding: 0 12px; border: 1.5px solid var(--line-strong); border-radius: 10px; font-size: 15px; cursor: pointer; }
+.reason-option input { width: 20px; height: 20px; margin: 0; accent-color: var(--navy); }
+.reason-option:has(input:checked) { border-color: var(--navy); background: #eef3f9; }
+.kv { display: flex; flex-direction: column; gap: 3px; font-size: 13.5px; color: var(--text); }
+.kv b { font-weight: 600; color: var(--ink); }
+.device-note { border-radius: 10px; padding: 8px 10px; font-size: 13.5px; line-height: 1.4; }
+.device-note.warn { background: var(--warn-bg); color: var(--warn-fg); }
+.device-note.neutral { background: #f5f6f8; color: var(--text); }
+.list-card .title-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.unit-type { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.legacy-row { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; }
+.legacy-row .row-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+.team-line { font-size: 13.5px; color: var(--text); overflow-wrap: anywhere; }
+.empty-state { padding: 18px 8px; text-align: center; color: var(--muted); font-size: 14px; }
 
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } .spinner { animation-duration: 3s; } }
 @media print { .topbar, .tabs, .step-bar, .banner, .toast { display: none !important; } }

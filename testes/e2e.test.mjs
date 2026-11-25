@@ -1,5 +1,5 @@
 /**
- * PET-Digital v1.2.0 — testes ponta a ponta (navegador em tamanho de celular).
+ * PET-Digital v1.3.0 — testes ponta a ponta (navegador em tamanho de celular).
  *
  * O quê: usa o aplicativo como um supervisor usaria, contra o Worker e o banco locais.
  * Como: Playwright + Chromium; nada é publicado e nenhum dado de produção é tocado.
@@ -16,6 +16,12 @@
  *  7. Falha de envio: a PET fica pendente, sobrevive a recarregar o app e é reenviada SEM duplicar.
  *  8. Sem internet: o usuário continua conectado e o rascunho continua disponível.
  *  9. Abrir a aba Conta não apaga o formulário (bug da v1.1.6).
+ * 10. Sessão recusada pelo servidor volta ao login sem apagar o rascunho.
+ * 11. Unidades criadas pelo admin; operacional com unidade automática no formulário; aviso de aparelho
+ *     pendente para o admin, aba Aparelhos e aprovação.
+ * 12. Operacional emite PET; verificador da mesma unidade vê só ela na Conferência; PET de fora da
+ *     unidade é confirmada como autêntica, sem detalhes.
+ * 13. Aba Aparelhos: filtros com contadores e revogação com motivo.
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -30,6 +36,8 @@ const SHOTS = process.env.PET_SCREENSHOTS || '';
 let servers, browser, context, page;
 let shotIndex = 0;
 const errors = [];
+// Arquivos da primeira PET (emitida pelo admin, sem unidade), usados no teste do verificador.
+let adminPetFiles = null;
 
 async function shot(name) {
   if (!SHOTS) return;
@@ -93,7 +101,8 @@ async function fillPerson(index, nome, matricula) {
 
 /** Preenche uma PET completa. `gasOut` simula medição inicial fora do limite. */
 async function fillCompletePet({ local = 'PV 2187 — Rua das Acácias', gasOut = false } = {}) {
-  await page.fill('[name="unidade"]', 'DMAE — Manutenção de Esgoto');
+  // v1.3.0: quem tem unidade no cadastro recebe o campo já preenchido e travado.
+  if (!(await page.locator('[name="unidade"]').getAttribute('readonly') !== null)) await page.fill('[name="unidade"]', 'DMAE — Manutenção de Esgoto');
   await page.fill('[name="local"]', local);
   await page.fill('[name="horaTermino"]', '23:59');
   await page.fill('[name="trabalho"]', 'Desobstrução e inspeção do poço de visita.');
@@ -229,6 +238,7 @@ test('3 a 6. emissão completa com medição fora do limite, PDF e validação',
   assert.equal(dossier.payload.checklist.find(c => c.number === '19').justification, 'Sem ar mandado');
   assert.equal(dossier.payload.professionals[0].type, 'supervisor');
   if (process.env.PET_KEEP_PDF) await (await import('node:fs/promises')).copyFile(pdfPath, process.env.PET_KEEP_PDF);
+  adminPetFiles = { pdfPath, jsonPath, numero };
 
   // Validação oficial na aba Gestão (admin).
   await page.click('#manageTabBtn');
@@ -238,8 +248,15 @@ test('3 a 6. emissão completa com medição fora do limite, PDF e validação',
   await page.waitForSelector('#verifyResult.alert-ok', { timeout: 30000 });
   assert.match(await page.textContent('#verifyResult'), /Documento válido/);
 
-  const rows = servers.db.query('SELECT numero_pet FROM pet_records');
+  // v1.3.0: a PET aparece na lista de PETs registradas com data e local gravados no servidor.
+  await page.waitForSelector(`#petList .list-card:has-text("${numero}")`);
+  assert.match(await page.textContent('#petList'), /PV 2187/);
+  await shot('gestao-pets');
+
+  const rows = servers.db.query('SELECT numero_pet, pet_local, unit_id FROM pet_records');
   assert.equal(rows.length, 1);
+  assert.equal(rows[0].pet_local, 'PV 2187 — Rua das Acácias');
+  assert.equal(rows[0].unit_id, null, 'admin sem unidade: PET sem unidade');
   assert.deepEqual(errors, [], 'sem erros de JavaScript');
 });
 
@@ -316,58 +333,171 @@ test('10. sessão recusada pelo servidor volta ao login sem apagar o rascunho', 
   assert.deepEqual(errors, [], 'sem erros de JavaScript');
 });
 
-test('11. operacional: troca de senha, aparelho aguardando aprovação e aprovação pelo gestor', async () => {
-  // Admin cadastra um operacional pela aba Gestão.
-  await page.click('#manageTabBtn');
-  await page.click('#newUserToggle');
-  await page.fill('#newUserName', 'Operador de Campo');
-  await page.fill('#newUserMatricula', '2000');
-  await page.fill('#newUserPassword', 'Temporaria123');
-  await page.click('#createUserBtn');
-  await page.waitForSelector('#usersList .list-card:has-text("Operador de Campo")');
-
-  // Sai e entra como operacional: senha temporária leva à Conta.
+/** Sai da conta atual e entra com outra. */
+async function switchUser(matricula, password) {
   await page.click('[data-tab="accountTab"]');
   await page.click('#logoutBtn');
   await page.click('#confirmOk');
   await page.waitForSelector('#loginScreen:not(.hidden)');
-  await page.fill('#loginMatricula', '2000');
-  await page.fill('#loginPassword', 'Temporaria123');
+  await page.fill('#loginMatricula', matricula);
+  await page.fill('#loginPassword', password);
   await page.click('#loginBtn');
+  await page.waitForSelector('#appShell:not(.hidden)');
+}
+
+/** Cadastra um usuário pela Gestão → Usuários. */
+async function createUserUi(name, matricula, role, unitName) {
+  await page.click('#newUserToggle');
+  await page.fill('#newUserName', name);
+  await page.fill('#newUserMatricula', matricula);
+  await page.selectOption('#newUserRole', role);
+  if (unitName) await page.selectOption('#newUserUnitId', { label: unitName });
+  await page.fill('#newUserPassword', 'Temporaria123');
+  await page.click('#createUserBtn');
+  await page.waitForSelector(`#usersList .list-card:has-text("${name}")`);
+}
+
+/** Primeiro acesso: troca a senha temporária. */
+async function changeTemporaryPassword(newPassword) {
   await page.waitForSelector('#accountTab.active');
-  assert.equal(await page.isVisible('#pwdPanel'), true, 'troca de senha aberta');
-  assert.equal(await page.isVisible('#manageTabBtn'), false, 'operacional não vê Gestão');
   await page.fill('#currentPassword', 'Temporaria123');
-  await page.fill('#newOwnPassword', 'NovaSenha456');
-  await page.fill('#confirmOwnPassword', 'NovaSenha456');
+  await page.fill('#newOwnPassword', newPassword);
+  await page.fill('#confirmOwnPassword', newPassword);
   await page.click('#changeOwnPasswordBtn');
   await page.waitForSelector('#passwordChangeNotice.hidden', { state: 'attached' });
+}
 
+test('11. unidades, operacional com unidade automática, aviso de aparelho pendente e aprovação', async () => {
+  // Admin cria as unidades na Gestão → Unidades.
+  await page.click('#manageTabBtn');
+  await page.click('[data-manage-section="units"]');
+  for (const [name, type] of [['Manutenção de Esgoto', 'unidade'], ['ETA Sucupira', 'equipe']]) {
+    await page.click('#newUnitToggle');
+    await page.fill('#newUnitName', name);
+    await page.click(`#newUnitType label:has(input[value="${type}"])`);
+    await page.click('#createUnitBtn');
+    await page.waitForSelector(`#unitsList .list-card:has-text("${name}")`);
+  }
+  // Nome repetido (sem acento/maiúscula) é recusado.
+  await page.click('#newUnitToggle');
+  await page.fill('#newUnitName', 'manutencao de esgoto');
+  await page.click('#createUnitBtn');
+  await page.waitForFunction(() => /Já existe/.test(document.querySelector('#toast').textContent));
+  await page.click('#newUnitToggle');
+  await shot('unidades');
+
+  // Cadastro de usuários com unidade da lista.
+  await page.click('[data-manage-section="users"]');
+  await page.click('#newUserToggle');
+  await page.fill('#newUserName', 'Sem Unidade');
+  await page.fill('#newUserMatricula', '1999');
+  await page.fill('#newUserPassword', 'Temporaria123');
+  await page.click('#createUserBtn');
+  await page.waitForFunction(() => /Escolha a unidade/.test(document.querySelector('#toast').textContent));
+  await page.click('#newUserToggle');
+  await createUserUi('Operador de Campo', '2000', 'operacional', 'Manutenção de Esgoto');
+  await createUserUi('Verificadora Esgoto', '3000', 'verificador', 'Manutenção de Esgoto');
+  await page.selectOption('#userUnitFilter', { label: 'ETA Sucupira' });
+  assert.equal(await page.locator('#usersList .list-card').count(), 0, 'filtro por unidade');
+  await page.selectOption('#userUnitFilter', { label: 'Manutenção de Esgoto' });
+  assert.equal(await page.locator('#usersList .list-card').count(), 2);
+  await shot('usuarios');
+
+  // Operacional: troca de senha, unidade automática e pedido do aparelho.
+  await switchUser('2000', 'Temporaria123');
+  assert.equal(await page.isVisible('#pwdPanel'), true, 'troca de senha aberta');
+  assert.equal(await page.isVisible('#manageTabBtn'), false, 'operacional não vê Gestão');
+  assert.equal(await page.isVisible('#devicesTabBtn'), false, 'operacional não vê Aparelhos');
+  assert.match(await page.textContent('#accountInfo'), /Manutenção de Esgoto/);
+  await changeTemporaryPassword('NovaSenha456');
   await page.fill('#deviceLabel', 'Celular do teste');
   await page.click('#registerDeviceBtn');
   await page.waitForFunction(() => document.querySelector('#deviceChipText').textContent.includes('Aguardando'));
+  assert.match(await page.textContent('#deviceRegistrationStatus'), /Pedido enviado em .* às \d{2}:\d{2}/);
   await shot('aguardando-aprovacao');
+  await page.click('[data-tab="formTab"]');
+  assert.equal(await page.inputValue('[name="unidade"]'), 'Manutenção de Esgoto');
+  assert.notEqual(await page.getAttribute('[name="unidade"]', 'readonly'), null, 'unidade travada');
 
-  // Gestor/admin vê o número na aba Gestão e aprova.
-  await page.click('#logoutBtn');
-  await page.click('#confirmOk');
-  await page.fill('#loginMatricula', '1000');
-  await page.fill('#loginPassword', 'SenhaForte123');
-  await page.click('#loginBtn');
-  await page.waitForSelector('#appShell:not(.hidden)');
-  await page.waitForSelector('#manageBadge:not(.hidden)');
-  assert.equal((await page.textContent('#manageBadge')).trim(), '1');
-  await page.click('#manageTabBtn');
-  await shot('gestao');
-  await page.click('[data-device-approve]');
-  await page.waitForSelector('#manageBadge.hidden', { state: 'attached' });
+  // Admin: faixa de aviso, número na aba Aparelhos e aprovação.
+  await switchUser('1000', 'SenhaForte123');
+  await page.waitForSelector('#pendingDevicesBanner:not(.hidden)');
+  assert.match(await page.textContent('#pendingDevicesText'), /1 aparelho aguardando aprovação/);
+  assert.equal((await page.textContent('#devicesBadge')).trim(), '1');
+  await shot('aviso-pendente');
+  await page.click('#pendingDevicesGo');
+  await page.waitForSelector('#devicesTab.active');
+  assert.equal(await page.isVisible('#pendingDevicesBanner'), false, 'faixa some dentro da aba Aparelhos');
+  const card = page.locator('#devicesList .list-card').first();
+  await card.waitFor();
+  assert.match(await card.textContent(), /Operador de Campo/);
+  assert.match(await card.textContent(), /Manutenção de Esgoto/);
+  assert.match(await card.textContent(), /Celular do teste/);
+  await shot('aparelhos-pendentes');
+  await card.locator('[data-device-approve]').click();
+  await page.waitForSelector('#devicesBadge.hidden', { state: 'attached' });
+  await page.waitForSelector('#devicesList .empty-state');
 
-  await page.click('[data-tab="accountTab"]');
-  await page.click('#logoutBtn');
-  await page.click('#confirmOk');
-  await page.fill('#loginMatricula', '2000');
-  await page.fill('#loginPassword', 'NovaSenha456');
-  await page.click('#loginBtn');
+  await switchUser('2000', 'NovaSenha456');
   await page.waitForFunction(() => document.querySelector('#deviceChipText').textContent.includes('autorizado'));
+  assert.deepEqual(errors, [], 'sem erros de JavaScript');
+});
+
+test('12. verificador vê só as PETs da unidade; PET de outra unidade só tem a autenticidade confirmada', async () => {
+  // Operacional (Esgoto) emite uma PET.
+  await page.click('[data-tab="formTab"]');
+  await fillCompletePet({ local: 'Elevatória EE-04' });
+  await page.click('#formNextBtn');
+  await page.waitForSelector('#doneView:not(.hidden)', { timeout: 60000 });
+  const numero = (await page.textContent('#doneNumero')).trim();
+  const row = servers.db.query('SELECT p.unit_name, p.pet_local FROM pet_records p WHERE numero_pet = ?', numero)[0];
+  assert.equal(row.unit_name, 'Manutenção de Esgoto', 'unidade gravada pelo servidor');
+
+  // Verificadora da mesma unidade.
+  await switchUser('3000', 'Temporaria123');
+  await changeTemporaryPassword('Verifica789');
+  assert.equal((await page.textContent('#manageTabBtn')).trim(), 'Conferência');
+  assert.equal(await page.isVisible('#devicesTabBtn'), false);
+  await page.click('#manageTabBtn');
+  assert.equal(await page.isVisible('#manageSections'), false, 'verificador não vê Usuários/Unidades');
+  await page.waitForSelector('#petList .list-card');
+  assert.equal(await page.locator('#petList .list-card').count(), 1, 'só a PET da unidade');
+  assert.match(await page.textContent('#petList'), new RegExp(numero));
+  assert.match(await page.textContent('#petList'), /Elevatória EE-04/);
+  assert.match(await page.textContent('#petList'), /Carlos Mendes/);
+  assert.match(await page.textContent('#petListScope'), /Manutenção de Esgoto/);
+  await shot('conferencia-verificador');
+
+  // A PET do admin não tem unidade: a verificadora confirma só a autenticidade.
+  await page.setInputFiles('#verifyPdfFile', adminPetFiles.pdfPath);
+  await page.setInputFiles('#verifyJsonFile', adminPetFiles.jsonPath);
+  await page.click('#verifyFilesBtn');
+  await page.waitForSelector('#verifyResult.alert-ok', { timeout: 30000 });
+  const text = await page.textContent('#verifyResult');
+  assert.match(text, /Documento autêntico/);
+  assert.match(text, /outra unidade/);
+  assert.doesNotMatch(text, /Administrador de Teste/, 'sem nome do emissor');
+  await shot('validacao-outra-unidade');
+  assert.deepEqual(errors, [], 'sem erros de JavaScript');
+});
+
+test('13. aba Aparelhos: contadores e revogação com motivo', async () => {
+  await switchUser('1000', 'SenhaForte123');
+  await page.click('#devicesTabBtn');
+  await page.click('[data-device-filter="active"]');
+  await page.waitForSelector('#devicesList .list-card:has-text("Operador de Campo")');
+  assert.equal((await page.textContent('[data-device-count="active"]')).trim(), '2');
+  const card = page.locator('#devicesList .list-card:has-text("Operador de Campo")');
+  assert.match(await card.textContent(), /Último uso: há|agora há pouco/);
+  await card.locator('[data-device-revoke]').click();
+  await page.waitForSelector('#deviceActionDialog[open]');
+  await page.click('.reason-option:has-text("Perda ou roubo")');
+  await shot('revogar-motivo');
+  await page.click('#deviceActionConfirm');
+  await page.waitForSelector('#deviceActionDialog:not([open])', { state: 'attached' });
+  await page.click('[data-device-filter="revoked"]');
+  await page.waitForSelector('#devicesList .list-card:has-text("Perda ou roubo")');
+  assert.match(await page.textContent('#devicesList'), /Revogado em/);
+  await shot('aparelhos-revogados');
   assert.deepEqual(errors, [], 'sem erros de JavaScript');
 });

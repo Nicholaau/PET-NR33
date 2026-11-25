@@ -1,6 +1,6 @@
 'use strict';
 /**
- * PET-Digital v1.2.0 — documentos, registros e inicialização.
+ * PET-Digital v1.3.0 — documentos, registros e inicialização.
  * O quê: PDF, arquivo de validação, compartilhamento, histórico local, validação e boot do app.
  * Como: usa snapshots do IndexedDB e registra somente hashes/metadados no Worker.
  * Quando: após a finalização ou ao abrir Registros/Validar.
@@ -789,8 +789,12 @@ Integridade local: ${localOk ? 'OK' : 'FALHA'}
 Registro exato no servidor: ${server.found ? 'ENCONTRADO' : 'NÃO ENCONTRADO'}
 Chave autorizada na emissão: ${server.keyAuthorizedAtRegistration ? 'SIM' : 'NÃO'}
 Assinaturas confirmadas no servidor: ${server.signaturesValid ? 'SIM' : 'NÃO'}
-Emissor: ${server.issuer ? `${server.issuer.name} (${server.issuer.matricula})` : 'NÃO CONFIRMADO'}`;
-    result.innerHTML = `<strong>${allOk ? 'Documento válido: PDF, arquivo de validação, emissor e aparelho confirmados.' : 'Documento não validado.'}</strong><span>${escapeHtml(server.message || server.reason || '')}</span><details class="details"><summary>Detalhes técnicos</summary><pre>${escapeHtml(technicalText)}</pre></details>`;
+Emissor: ${server.limited ? 'RESTRITO (PET de outra unidade)' : server.issuer ? `${server.issuer.name} (${server.issuer.matricula})` : 'NÃO CONFIRMADO'}`;
+    // v1.3.0: para o verificador, PET de outra unidade confirma só a autenticidade.
+    const title = !allOk ? 'Documento não validado.'
+      : server.limited ? `Documento autêntico: ${server.record?.numero_pet || ''}.`
+      : 'Documento válido: PDF, arquivo de validação, emissor e aparelho confirmados.';
+    result.innerHTML = `<strong>${escapeHtml(title)}</strong><span>${escapeHtml(server.message || server.reason || '')}</span><details class="details"><summary>Detalhes técnicos</summary><pre>${escapeHtml(technicalText)}</pre></details>`;
   } catch (err) {
     result.className = 'alert alert-bad';
     result.textContent = 'Não foi possível validar oficialmente: ' + err.message;

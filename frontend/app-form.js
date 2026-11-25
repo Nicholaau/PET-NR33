@@ -1,6 +1,6 @@
 'use strict';
 /**
- * PET-Digital v1.2.0 — formulário e emissão.
+ * PET-Digital v1.3.0 — formulário e emissão.
  * O quê: fotos, assinaturas, checklist, medições, etapas, revisão, validação e finalização.
  * Como: coleta o formulário, aplica regras locais e prepara o dossiê assinado.
  * Quando: preenchimento e finalização da PET.
@@ -866,7 +866,7 @@ function buildPayload(existingPetNumber = '') {
   return {
     schema: PAYLOAD_SCHEMA,
     proofStandard: buildProofStandard('PET_PAYLOAD'),
-    issuedBy: { userId: user?.id || '', name: user?.name || '', matricula: user?.matricula || '', role: user?.role || '' },
+    issuedBy: { userId: user?.id || '', name: user?.name || '', matricula: user?.matricula || '', role: user?.role || '', unitId: user?.unitId || null, unitName: user?.unitName || null },
     fields,
     checklist: collectChecklist(),
     professionals: collectPeople(),
@@ -1399,16 +1399,8 @@ function bindEvents() {
     if (el.dataset.userReset) openResetPassword(el.dataset.userReset);
     if (el.dataset.userDelete) deleteUser(el.dataset.userDelete).catch(err => notify('Erro ao excluir acesso: ' + err.message, 'bad'));
   });
-  $('#devicesList')?.addEventListener('click', async event => {
-    const approve = event.target.closest('[data-device-approve]');
-    const revoke = event.target.closest('[data-device-revoke]');
-    if (approve) changeDeviceStatus(approve.dataset.deviceApprove, 'approve', approve).catch(err => notify(err.message, 'bad'));
-    if (revoke) {
-      const action = revoke.dataset.deviceAction || 'Revogar';
-      const ok = await askConfirm(action === 'Rejeitar' ? 'Rejeitar esta solicitação de aparelho?' : 'Revogar a autorização deste aparelho? Ele não poderá mais emitir PETs.', { okLabel: action, danger: true });
-      if (ok) changeDeviceStatus(revoke.dataset.deviceRevoke, 'revoke', revoke).catch(err => notify(err.message, 'bad'));
-    }
-  });
+  // Aparelhos, unidades e PETs registradas (v1.3.0, app-gestao.js)
+  bindGestaoEvents();
   $('#verifyFilesBtn')?.addEventListener('click', () => verifyFiles());
   $('#serverValidateBtn')?.addEventListener('click', () => validateHashOnServer());
   $('#recordsList')?.addEventListener('click', handleRecordAction);
@@ -1442,7 +1434,9 @@ function showTab(tabId) {
   const state = authState || loadAuthState();
   if (!state?.user) { renderAuthState(); return; }
   const canVerify = ['admin', 'gestor', 'verificador'].includes(state.user.role);
+  const isManager = ['admin', 'gestor'].includes(state.user.role);
   if (tabId === 'manageTab' && !canVerify) tabId = 'formTab';
+  if (tabId === 'devicesTab' && !isManager) tabId = 'formTab';
   $$('.tab').forEach(t => t.classList.remove('active'));
   const target = $('#' + tabId) || $('#formTab');
   target.classList.add('active');
@@ -1455,6 +1449,8 @@ function showTab(tabId) {
   window.scrollTo({ top: 0 });
   if (target.id === 'recordsTab') renderRecords();
   if (target.id === 'accountTab') { renderAuthState(); refreshDevices(true); }
-  if (target.id === 'manageTab') { refreshDevices(true); if (['admin', 'gestor'].includes(state.user.role)) refreshUsers(); }
+  if (target.id === 'manageTab') setManageSection(isManager ? manageSection : 'pets');
+  if (target.id === 'devicesTab') refreshDeviceAdmin();
+  updatePendingBanner();
   if (target.id === 'formTab' && currentFormStep === 6 && $('#doneView').classList.contains('hidden')) renderReview();
 }

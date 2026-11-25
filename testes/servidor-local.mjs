@@ -1,5 +1,5 @@
 /**
- * PET-Digital v1.2.0 — servidor local de testes.
+ * PET-Digital v1.3.0 — servidor local de testes.
  *
  * O quê: roda no computador, sem Cloudflare, o MESMO código do Worker (API) e do frontend.
  * Como: o Worker é executado pelo Node com o banco simulado (SQLite local); o frontend é servido

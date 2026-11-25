@@ -1,6 +1,6 @@
 'use strict';
 /**
- * PET-Digital v1.2.0 — núcleo compartilhado.
+ * PET-Digital v1.3.0 — núcleo compartilhado.
  * O quê: constantes, utilitários, armazenamento local/IndexedDB e criptografia.
  * Como: declara as funções usadas pelos módulos carregados depois deste arquivo.
  * Quando: é o primeiro script do frontend.
@@ -8,7 +8,7 @@
 
 
 /**
- * PET Digital NR-33 v1.2.0 — frontend comentado.
+ * PET Digital NR-33 v1.3.0 — frontend comentado.
  *
  * Visão geral do arquivo:
  * - A interface é um PWA estático no Cloudflare Pages, mas a emissão oficial depende
@@ -25,13 +25,13 @@
  */
 
 // Versão funcional gravada no dossiê e exibida nos elementos de prova.
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 
 // Perfil técnico aceito pelo próprio validador. Esses valores padronizam como o hash
 // é calculado, qual algoritmo assina o registro e como outro validador deve conferir.
 const VALIDATION_PROFILE = 'PET-DIGITAL-NR33-v1';
 const ACCEPTED_VALIDATION_PROFILES = new Set(['PET-DIGITAL-NR33-v1', 'PET-DIGITAL-NR33-PROOF/v1']);
-const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.2.0';
+const PAYLOAD_SCHEMA = 'PET-DIGITAL-NR33/v1.3.0';
 const RECORD_TYPE = 'PET-DIGITAL-DOSSIE/v1';
 const HASH_ALGORITHM = 'SHA-256';
 const SIGNATURE_ALGORITHM = 'ECDSA-P256-SHA256';
@@ -421,6 +421,7 @@ function clearWorkspaceMemory() {
   resetPeople();
   renderPeople();
   setDefaultDateTime();
+  if (typeof applyUserUnitToForm === 'function') applyUserUnitToForm();
   if (typeof refreshFormDerivedUi === 'function') refreshFormDerivedUi();
   ['#serverPanel', '#pendingAttemptBox', '#storageNotice'].forEach(sel => $(sel)?.classList.add('hidden'));
   const records = $('#recordsList'); if (records) records.innerHTML = '';
@@ -444,6 +445,8 @@ async function loadUserWorkspace({ force = false } = {}) {
   clearWorkspaceMemory();
   loadDraft();
   await restorePendingAttempt();
+  // v1.3.0: a unidade vem do cadastro (sobrepõe o que estava no rascunho).
+  if (typeof applyUserUnitToForm === 'function') applyUserUnitToForm();
   renderRecords();
 }
 

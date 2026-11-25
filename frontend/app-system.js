@@ -1,9 +1,15 @@
 'use strict';
 /**
- * PET-Digital v1.2.0 — autenticação, aparelho e gestão.
- * O quê: login, sessão, situação do aparelho, usuários, aprovação de aparelhos e chamadas da API.
+ * PET-Digital v1.3.0 — autenticação, aparelho e cadastro de usuários.
+ * O quê: login, sessão, situação do próprio aparelho, usuários e chamadas da API.
  * Como: usa os utilitários do app-core.js e o Worker configurado em API_BASE_URL.
- * Quando: tela de login e abas Conta e Gestão.
+ * Quando: tela de login e abas Conta e Gestão. A aba Aparelhos e as unidades ficam no app-gestao.js.
+ *
+ * Mudanças da v1.3.0:
+ * - abas conforme o perfil: Aparelhos (gestor/admin) e Gestão/Conferência (verificador, gestor, admin);
+ * - o próprio aparelho é consultado em /devices?mine=1 (a lista da equipe é paginada na aba Aparelhos);
+ * - mensagem do aparelho pendente com horário do pedido; pedido recusado pode ser refeito;
+ * - unidade escolhida da lista oficial no cadastro e na edição de usuários.
  *
  * Mudanças da v1.2.0:
  * - a sessão fica guardada no aparelho (localStorage) até expirar no servidor (8 h);
@@ -128,13 +134,21 @@ function renderAuthState() {
   const canVerify = ['admin', 'gestor', 'verificador'].includes(user?.role);
   const isManager = ['admin', 'gestor'].includes(user?.role);
   $('#manageTabBtn')?.classList.toggle('hidden', !canVerify);
-  $('#userManagementSection')?.classList.toggle('hidden', !isManager);
-  $('#teamDevicesSection')?.classList.toggle('hidden', !isManager);
+  $('#devicesTabBtn')?.classList.toggle('hidden', !isManager);
+  $('#appTabs')?.classList.toggle('tabs-dense', isManager);
+  $('#manageSections')?.classList.toggle('hidden', !isManager);
+  // Verificador vê "Conferência" (PETs da unidade e validação); gestor/admin, "Gestão".
+  const manageLabel = isManager ? 'Gestão' : 'Conferência';
+  if ($('#manageTabLabel')) $('#manageTabLabel').textContent = manageLabel;
+  if ($('#manageTitle')) $('#manageTitle').textContent = manageLabel;
   configureRoleSelects();
+  if (typeof updatePendingBanner === 'function') updatePendingBanner();
+  if (isLogged && typeof applyUserUnitToForm === 'function') applyUserUnitToForm();
 
   if (isLogged) {
     $('#accountName').textContent = user.name || '';
-    $('#accountInfo').textContent = `Matrícula ${user.matricula || ''} · ${roleLabel(user.role)}`;
+    const unitText = user.unitName || (isManager ? 'Empresa toda' : 'Unidade não definida');
+    $('#accountInfo').textContent = `Matrícula ${user.matricula || ''} · ${roleLabel(user.role)} · ${unitText}`;
     $('#appVersionLabel').textContent = `PET Digital versão ${APP_VERSION} — informe este número ao relatar um problema.`;
     const until = state.expiresAt ? new Date(state.expiresAt).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
     $('#accountSession').textContent = until ? `Sessão ativa neste aparelho até ${until}` : 'Sessão ativa neste aparelho';
@@ -220,9 +234,8 @@ async function ensureOfficialAccessOrGuide(actionLabel = 'continuar') {
   let devices = [];
   let key;
   try {
-    const data = await apiFetch('/devices');
+    const data = await apiFetch('/devices?mine=1');
     devices = data.devices || [];
-    renderDevicesList(devices);
     await migrateLegacyKeyForCurrentUser(devices);
     key = await ensureKeyPair();
     await updateKeyStatus();
@@ -298,6 +311,7 @@ async function login() {
     purgeLegacySharedStorage();
     await loadUserWorkspace({ force: true });
     refreshDevices(true);
+    refreshPendingDevicesCount();
     if (data.user.mustChangePassword) {
       showTab('accountTab');
       openPasswordPanel(true);
@@ -316,9 +330,9 @@ async function logout() {
   clearWorkspaceMemory();
   workspaceUserId = null;
   deviceState = 'unknown';
+  resetGestaoState();
   saveAuthState(null);
-  if ($('#devicesList')) $('#devicesList').innerHTML = '';
-  if ($('#usersList')) $('#usersList').innerHTML = '';
+  if ($('#usersList')) { $('#usersList').innerHTML = ''; delete $('#usersList').dataset.users; }
   setTimeout(() => $('#loginMatricula')?.focus(), 100);
 }
 
@@ -337,6 +351,7 @@ async function refreshMe() {
     purgeLegacySharedStorage();
     if (previousId !== data.user.id) await loadUserWorkspace({ force: true });
     await refreshDevices(true);
+    refreshPendingDevicesCount();
   } catch (err) {
     if (err.status === 401 || err.status === 403) { workspaceUserId = null; saveAuthState(null); return; }
     // Sem conexão ou erro temporário: o usuário continua dentro e pode preencher o rascunho.
@@ -382,14 +397,16 @@ async function createUser() {
     matricula: normalizeText($('#newUserMatricula').value),
     email: normalizeText($('#newUserEmail').value),
     role: $('#newUserRole').value,
-    unit: normalizeText($('#newUserUnit').value),
+    unitId: $('#newUserUnitId').value || null,
     password: $('#newUserPassword').value
   };
   if (!body.name || !body.matricula || !body.password) return notify('Informe nome, matrícula e senha temporária.', 'bad');
+  if (!body.unitId && ['operacional', 'verificador'].includes(body.role)) return notify('Escolha a unidade do usuário.', 'bad');
   await apiFetch('/users', { method: 'POST', body });
   notify('Usuário cadastrado. No primeiro acesso ele deverá trocar a senha temporária.', 'ok');
-  ['#newUserName', '#newUserMatricula', '#newUserEmail', '#newUserUnit', '#newUserPassword'].forEach(sel => { const el = $(sel); if (el) el.value = ''; });
+  ['#newUserName', '#newUserMatricula', '#newUserEmail', '#newUserUnitId', '#newUserPassword'].forEach(sel => { const el = $(sel); if (el) el.value = ''; });
   configureRoleSelects({ newRole: 'operacional' });
+  updateNewUserUnitOptions();
   toggleNewUserPanel(false);
   await refreshUsers();
 }
@@ -421,7 +438,10 @@ function renderUsers(users) {
   const box = $('#usersList');
   if (!box) return;
   const selfId = (authState || loadAuthState())?.user?.id;
-  box.innerHTML = (users || []).map(u => {
+  const visible = filterUsersForView(users);
+  const count = $('#usersCount');
+  if (count) count.textContent = visible.length === (users || []).length ? `${visible.length} usuários` : `${visible.length} de ${(users || []).length} usuários`;
+  box.innerHTML = visible.map(u => {
     const manageable = canManageUser(u);
     const isSelf = u.id === selfId;
     const actions = manageable
@@ -433,12 +453,13 @@ function renderUsers(users) {
       : '<span class="muted small-text">Somente administrador altera este perfil.</span>';
     return `<div class="list-card">
       <span class="title">${escapeHtml(u.name)}</span>
-      <span class="meta">Matrícula ${escapeHtml(u.matricula)} · ${escapeHtml(roleLabel(u.role))} · ${escapeHtml(statusLabel(u.status))}${u.unit ? ' · ' + escapeHtml(u.unit) : ''}</span>
+      <span class="meta">Matrícula ${escapeHtml(u.matricula)} · ${escapeHtml(roleLabel(u.role))} · ${escapeHtml(statusLabel(u.status))}</span>
+      <span class="sub">${u.unitName ? escapeHtml(u.unitName) : ['gestor', 'admin'].includes(u.role) ? 'Empresa toda' : `<span class="status-chip status-warn">Sem unidade</span>${u.legacyUnit ? ` <span class="muted small-text">antes: “${escapeHtml(u.legacyUnit)}”</span>` : ''}`}</span>
       ${u.mustChangePassword ? '<span class="status-chip status-warn">Senha temporária: troca pendente</span>' : ''}
       ${isSelf ? '<span class="muted small-text">Sua conta. Altere a senha na aba Conta.</span>' : ''}
       ${actions}
     </div>`;
-  }).join('') || '<p class="hint">Nenhum usuário encontrado.</p>';
+  }).join('') || '<p class="empty-state">Nenhum usuário encontrado.</p>';
 }
 
 /** Lista usuários cadastrados. */
@@ -466,7 +487,7 @@ function openEditUser(userId) {
   $('#editUserName').value = user.name || '';
   $('#editUserMatricula').value = user.matricula || '';
   $('#editUserEmail').value = user.email || '';
-  $('#editUserUnit').value = user.unit || '';
+  fillEditUserUnitSelect(user);
   configureRoleSelects({ editRole: user.role });
   $('#editUserStatus').value = user.status || 'active';
   $('#editUserDialog').showModal();
@@ -478,14 +499,17 @@ async function saveUserEdit() {
     name: normalizeText($('#editUserName').value),
     matricula: normalizeText($('#editUserMatricula').value),
     email: normalizeText($('#editUserEmail').value),
-    unit: normalizeText($('#editUserUnit').value),
+    unitId: $('#editUserUnitId').value || null,
     role: $('#editUserRole').value,
     status: $('#editUserStatus').value
   };
   if (!body.name || !body.matricula) return notify('Nome e matrícula são obrigatórios.', 'bad');
+  if (!body.unitId && ['operacional', 'verificador'].includes(body.role)) return notify('Escolha a unidade do usuário.', 'bad');
   const data = await apiFetch(`/users/${encodeURIComponent(id)}`, { method: 'PATCH', body });
   $('#editUserDialog').close();
   if (id === (authState || loadAuthState())?.user?.id) saveAuthState({ ...authState, user: data.user });
+  await loadUnits().catch(() => {});
+  renderUnmappedNotice();
   await refreshUsers();
   notify('Cadastro atualizado.', 'ok');
 }
@@ -519,7 +543,7 @@ async function deleteUser(userId) {
   if (!ok) return;
   await apiFetch(`/users/${encodeURIComponent(userId)}`, { method: 'DELETE' });
   await refreshUsers();
-  await refreshDevices(true);
+  refreshPendingDevicesCount();
   notify('Acesso excluído e histórico preservado.', 'ok');
 }
 
@@ -530,13 +554,13 @@ async function resetLocalDeviceProtection() {
   const key = await readLocalKeyPair();
   if (!key) return notify('Este aparelho não possui proteção local para apagar.');
   if (authToken()) {
-    const data = await apiFetch('/devices');
+    const data = await apiFetch('/devices?mine=1');
     const state = authState || loadAuthState();
     const linked = (data.devices || []).find(d => d.public_key_hash === key.publicKeyHash && d.user_id === state?.user?.id);
     if (linked && ['active', 'pending'].includes(linked.status)) {
       notify(linked.status === 'active'
         ? 'Antes de apagar a proteção local, um gestor precisa revogar a autorização deste aparelho.'
-        : 'Antes de apagar a proteção local, um gestor precisa rejeitar a solicitação pendente.', 'bad');
+        : 'Antes de apagar a proteção local, um gestor precisa recusar o pedido pendente.', 'bad');
       return;
     }
   }
@@ -554,13 +578,13 @@ async function registerDevice(button) {
   try {
     const key = await ensureKeyPair();
     const body = {
-      deviceLabel: normalizeText($('#deviceLabel').value) || `Aparelho ${new Date().toLocaleDateString('pt-BR')}`,
+      deviceLabel: normalizeText($('#deviceLabel').value) || deviceKind(navigator.userAgent) || `Aparelho ${new Date().toLocaleDateString('pt-BR')}`,
       publicKeyJwk: key.publicKey,
       publicKeyHash: key.publicKeyHash,
       algorithm: SIGNATURE_ALGORITHM
     };
     const data = await apiFetch('/devices/register', { method: 'POST', body });
-    notify(data.message || (data.device?.status === 'active' ? 'Aparelho autorizado.' : 'Solicitação enviada. Agora basta um gestor aprovar.'), 'ok', 5000);
+    notify(data.message || (data.device?.status === 'active' ? 'Aparelho autorizado.' : 'Pedido enviado. Agora é só aguardar a aprovação do gestor.'), 'ok', 5000);
     await refreshDevices(true);
     await updateKeyStatus();
   } finally {
@@ -568,48 +592,16 @@ async function registerDevice(button) {
   }
 }
 
-/** Renderiza a lista de aparelhos da equipe (gestor/admin), pendentes primeiro. */
-function renderDevicesList(devices) {
-  const box = $('#devicesList');
-  const actor = (authState || loadAuthState())?.user;
-  const isManager = ['admin', 'gestor'].includes(actor?.role);
-  const pendingCount = isManager ? (devices || []).filter(d => d.status === 'pending').length : 0;
-  const badge = $('#manageBadge');
-  if (badge) { badge.textContent = String(pendingCount); badge.classList.toggle('hidden', !pendingCount); }
-  const count = $('#devicesCount');
-  if (count) { count.textContent = pendingCount ? `${pendingCount} aguardando` : ''; count.classList.toggle('hidden', !pendingCount); }
-  if (!box) return;
-  if (!isManager) { box.innerHTML = ''; return; }
-  const order = { pending: 0, active: 1, revoked: 2, lost: 3 };
-  const sorted = [...(devices || [])].sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
-  box.innerHTML = sorted.map(d => {
-    const chip = d.status === 'active' ? 'status-ok' : d.status === 'pending' ? 'status-warn' : 'status-bad';
-    const primary = d.status === 'pending'
-      ? `<button type="button" class="btn primary small" data-device-approve="${escapeAttr(d.id)}">Aprovar</button>`
-      : ['revoked', 'lost'].includes(d.status)
-        ? `<button type="button" class="btn secondary small" data-device-approve="${escapeAttr(d.id)}">Reativar</button>` : '';
-    const revoke = d.status === 'active'
-      ? `<button type="button" class="btn danger-outline small" data-device-revoke="${escapeAttr(d.id)}" data-device-action="Revogar">Revogar</button>`
-      : d.status === 'pending'
-        ? `<button type="button" class="btn danger-outline small" data-device-revoke="${escapeAttr(d.id)}" data-device-action="Rejeitar">Rejeitar</button>` : '';
-    return `<div class="list-card">
-      <div class="row-between"><span class="title">${escapeHtml(d.device_label)}</span><span class="status-chip ${chip}">${escapeHtml(statusLabel(d.status))}</span></div>
-      <span class="meta">${escapeHtml(d.user_name || d.user_id || '')}${d.user_matricula ? ' · matrícula ' + escapeHtml(d.user_matricula) : ''}</span>
-      <div class="actions-row">${revoke}${primary}</div>
-    </div>`;
-  }).join('') || '<p class="hint">Nenhum aparelho cadastrado.</p>';
-}
-
 /**
- * Consulta a situação do aparelho atual e, para gestores/admins, a fila da equipe.
- * Atualiza o selo do topo, o quadro "Este aparelho" e o botão de solicitação.
+ * Consulta a situação do aparelho atual (somente os aparelhos do próprio usuário).
+ * Atualiza o selo do topo, o quadro "Este aparelho" e o botão de pedido.
+ * A lista da equipe fica na aba Aparelhos (app-gestao.js).
  */
 async function refreshDevices(silent = false) {
   const state = authState || loadAuthState();
   if (!state?.user) return;
   try {
-    const data = await apiFetch('/devices');
-    renderDevicesList(data.devices || []);
+    const data = await apiFetch('/devices?mine=1');
     await migrateLegacyKeyForCurrentUser(data.devices || []);
     const key = await readLocalKeyPair();
     const mine = key ? (data.devices || []).filter(d => d.public_key_hash === key.publicKeyHash && d.user_id === state.user.id) : [];
@@ -617,47 +609,44 @@ async function refreshDevices(silent = false) {
     const button = $('#registerDeviceBtn');
     const labelField = $('#deviceLabelField');
     const setBox = (kind, text) => { if (box) { box.className = `alert alert-${kind}`; box.textContent = text; } };
+    const pending = mine.find(d => d.status === 'pending');
+    const stopped = mine.find(d => ['revoked', 'lost'].includes(d.status));
     let showRegister = true;
     if (!key) {
       deviceState = 'none';
-      setBox('warn', 'Este aparelho ainda não foi autorizado. Toque no botão abaixo; o aplicativo prepara a proteção e envia a solicitação.');
+      setBox('warn', 'Este aparelho ainda não foi autorizado. Toque no botão abaixo; o aplicativo prepara a proteção e envia o pedido ao gestor.');
       if (button) { button.disabled = false; button.textContent = 'Solicitar autorização deste aparelho'; }
     } else if (mine.some(d => d.status === 'active')) {
       deviceState = 'active';
       setBox('ok', 'Este aparelho pode finalizar e assinar PETs. Se trocar ou perder o celular, avise o gestor para revogar a autorização.');
       showRegister = false;
-    } else if (mine.some(d => d.status === 'pending')) {
+    } else if (pending) {
       deviceState = 'pending';
-      setBox('warn', 'Solicitação enviada. Assim que um gestor aprovar, a emissão fica liberada. Você não precisa repetir nenhuma ação.');
+      const when = pending.created_at ? new Date(pending.created_at) : null;
+      const quando = when ? ` em ${when.toLocaleDateString('pt-BR')} às ${when.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}` : '';
+      setBox('warn', `Pedido enviado${quando}. A emissão fica liberada assim que o gestor aprovar; não é preciso repetir o pedido. Se for urgente, avise o gestor do seu setor.`);
       showRegister = false;
-    } else if (mine.some(d => ['revoked', 'lost'].includes(d.status))) {
+    } else if (stopped?.refused) {
       deviceState = 'revoked';
-      setBox('bad', 'A autorização deste aparelho foi revogada. Peça a reativação a um gestor; não faça novo cadastro.');
+      setBox('bad', `O pedido deste aparelho foi recusado${stopped.revoke_reason ? ` (${stopped.revoke_reason})` : ''}. Se foi engano, converse com o gestor e envie um novo pedido.`);
+      if (button) { button.disabled = false; button.textContent = 'Enviar novo pedido'; }
+    } else if (stopped) {
+      deviceState = 'revoked';
+      const when = stopped.revoked_at ? ` em ${new Date(stopped.revoked_at).toLocaleDateString('pt-BR')}` : '';
+      setBox('bad', `A autorização deste aparelho foi revogada${when}${stopped.revoke_reason ? ` (${stopped.revoke_reason})` : ''}. Peça ao gestor para reativá-la; não é preciso fazer novo pedido.`);
       showRegister = false;
     } else {
       deviceState = 'unregistered';
-      setBox('warn', 'A proteção local existe, mas a solicitação ainda não foi enviada. Toque no botão abaixo uma única vez.');
-      if (button) { button.disabled = false; button.textContent = 'Enviar solicitação de autorização'; }
+      setBox('warn', 'A proteção local existe, mas o pedido ainda não foi enviado. Toque no botão abaixo uma única vez.');
+      if (button) { button.disabled = false; button.textContent = 'Enviar pedido de autorização'; }
     }
     button?.classList.toggle('hidden', !showRegister);
-    labelField?.classList.toggle('hidden', !showRegister);
+    labelField?.classList.toggle('hidden', !showRegister || Boolean(stopped?.refused));
     updateDeviceChip();
     await updateKeyStatus();
   } catch (err) {
     if (err.network) { if (deviceState === 'unknown') updateDeviceChip(); return; }
     if (!silent) notify(err.message, 'bad');
-  }
-}
-
-/** Aprova, reativa, rejeita ou revoga e atualiza a lista imediatamente. */
-async function changeDeviceStatus(id, action, button) {
-  if (button) button.disabled = true;
-  try {
-    const data = await apiFetch(`/devices/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: {} });
-    await refreshDevices();
-    notify(data.message || 'Situação do aparelho atualizada.', 'ok');
-  } finally {
-    if (button) button.disabled = false;
   }
 }
 
@@ -678,9 +667,9 @@ async function validateHashOnServer(hash) {
   try {
     const data = await apiFetch('/validate', { method: 'POST', body: { payloadHash } });
     result.className = 'alert ' + (data.found ? 'alert-ok' : 'alert-warn');
-    result.textContent = data.found
-      ? `Registro encontrado. Nº PET: ${data.record.numero_pet}. Recebido em ${formatDateTime(data.record.server_received_at)}. Situação: ${data.record.status}.`
-      : 'Registro não encontrado no sistema.';
+    result.textContent = !data.found ? 'Registro não encontrado no sistema.'
+      : data.limited ? `Registro encontrado: PET ${data.record.numero_pet}. Ela é de outra unidade; os detalhes ficam restritos.`
+      : `Registro encontrado. Nº PET: ${data.record.numero_pet}. Recebido em ${formatDateTime(data.record.server_received_at)}. Situação: ${data.record.status === 'accepted' ? 'registrada' : data.record.status}.`;
   } catch (err) {
     result.className = 'alert alert-bad';
     result.textContent = err.message;

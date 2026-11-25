@@ -4,7 +4,7 @@ Os testes funcionam em quatro camadas. Cada uma pega um tipo diferente de proble
 
 | Camada | Onde roda | O que pega | Quando usar |
 |---|---|---|---|
-| 1. Testes automáticos | Computador, sem internet e sem Cloudflare | Erros de programação, regras quebradas, PET duplicada, sessão, PDF | Antes de publicar **qualquer** versão |
+| 1. Testes automáticos | Computador, sem internet e sem Cloudflare | Erros de programação, regras quebradas, permissões, PET duplicada, sessão, PDF | Antes de publicar **qualquer** versão |
 | 2. Servidor local | Computador | Testar à mão uma tela ou um ajuste, sem risco | Durante ajustes |
 | 3. Homologação na Cloudflare | Celulares reais, banco separado | Câmera, assinatura, GPS, rede, compartilhamento | Antes de liberar para a equipe |
 | 4. Teste de campo | Serviço real acompanhado | Uso real, dúvidas dos supervisores | Primeiras semanas de uso |
@@ -34,7 +34,7 @@ npm run test:api    # só regras do Worker (segundos)
 npm run test:app    # só o aplicativo no navegador
 ```
 
-Resultado esperado: `pass 17` e `fail 0`. Qualquer `fail` mostra o teste e a linha que falhou.
+Resultado esperado: `pass 27` e `fail 0`. Qualquer `fail` mostra o teste e a linha que falhou.
 
 Para guardar capturas de tela de cada passo: `PET_SCREENSHOTS=capturas npm run test:app` (Linux/Mac) ou `set PET_SCREENSHOTS=capturas && npm run test:app` (Windows).
 
@@ -48,7 +48,13 @@ Para guardar capturas de tela de cada passo: `PET_SCREENSHOTS=capturas npm run t
 - hierarquia (gestor não cria admin; operacional não lista usuários);
 - aparelho de operacional pendente até aprovação;
 - registro de PET exige sessão e rejeita arquivo inválido;
-- sessão revogada recebe 401.
+- sessão revogada recebe 401;
+- unidades: nome repetido recusado (sem diferenciar acento e maiúscula); só gestor e admin criam; operacional e verificador exigem unidade; desativar exige mover os usuários; reativar;
+- cadastros antigos: texto livre ligado à unidade oficial, com as PETs; admin e gestor sem unidade ficam de fora;
+- PETs: verificador lista e consulta só a própria unidade; outra unidade por código mostra só número e situação; gestor filtra por unidade e busca; operacional não lista;
+- aparelhos: contadores, paginação de 15, busca por nome e matrícula; gestor não vê aparelhos de gestor/admin;
+- aparelhos: “aprovar e revogar o anterior”, aviso de outro aparelho ativo, motivo gravado, reativação;
+- aparelhos: recusa diferente de revogação; pedido recusado pode ser refeito; revogado após aprovação não.
 
 **Aplicativo (`e2e.test.mjs`)**, em tela de celular:
 1. Primeiro administrador, login, “Mostrar senha”, aparelho autorizado.
@@ -58,8 +64,12 @@ Para guardar capturas de tela de cada passo: `PET_SCREENSHOTS=capturas npm run t
 5. Queda de internet no envio: PET fica pendente, sobrevive a recarregar o app e a trocar de aba, é reenviada **com o mesmo número** e fica registrada **uma única vez**.
 6. Sem internet: usuário continua conectado e o rascunho continua lá.
 7. Sessão recusada pelo servidor: volta ao login e o rascunho é mantido.
-8. Operacional: troca obrigatória da senha temporária, aparelho “Aguardando aprovação”, número na aba Gestão do gestor, aprovação e aparelho autorizado.
-9. Nenhum erro de JavaScript em todo o percurso.
+8. Admin cria unidades (nome repetido recusado) e cadastra operacional e verificador com unidade; filtro por unidade.
+9. Operacional: troca obrigatória da senha, unidade preenchida e travada no formulário, “Pedido enviado em … às …”.
+10. Admin: faixa “1 aparelho aguardando aprovação”, número na aba Aparelhos, “Ver agora”, aprovação.
+11. Operacional emite PET; verificador da mesma unidade vê só ela na aba Conferência, com local e equipe; PET de fora da unidade é validada como “Documento autêntico”, sem o nome do emissor.
+12. Aba Aparelhos: contador de ativos, revogação com motivo “Perda ou roubo” e registro em Revogados.
+13. Nenhum erro de JavaScript em todo o percurso.
 
 > Quando um problema novo for encontrado em campo, o ideal é criar um teste que o reproduza antes de corrigir. Assim ele não volta numa versão futura.
 
@@ -85,8 +95,8 @@ Serve para testar em **celulares reais** sem misturar PETs de teste com as ofici
 
 ### 3.1 Banco e Worker de homologação (uma vez)
 
-1. **D1:** crie um banco `pet_digital_homolog` e rode, no Console, as migrations `0001`, `0003` e `0004`, nessa ordem.
-2. **Worker:** crie um Worker `pet-digital-api-homolog` com o mesmo código (`worker-pet-digital-api-v1.2.0.js`):
+1. **D1:** crie um banco `pet_digital_homolog` e rode, no Console, as migrations `0001`, `0003`, `0004` e `0005`, nessa ordem. Se o banco de homologação já existe, rode só a `0005`.
+2. **Worker:** crie um Worker `pet-digital-api-homolog` com o mesmo código (`worker-pet-digital-api-v1.3.0.js`):
    - binding `DB` → `pet_digital_homolog`;
    - variáveis iguais às do `wrangler.toml`, com `APP_ENV = "homologacao"` e `CORS_ALLOWED_ORIGIN = "https://pet-digital.pages.dev"`;
    - secrets **diferentes** dos de produção: `SESSION_SECRET`, `PASSWORD_PEPPER`, `BOOTSTRAP_ADMIN_TOKEN`.
@@ -114,8 +124,9 @@ Marque cada item em pelo menos um Android e, se a equipe usar, um iPhone.
 |---|---|---|
 | 1 | Entrar com matrícula e senha | Abre em “Nova PET”; selo do aparelho no topo |
 | 2 | Fechar o app e abrir de novo | Continua conectado (até 8 h) |
-| 3 | Operador sem autorização: Conta → Solicitar autorização | Selo “Aguardando aprovação”; aparece em Gestão do gestor com número no ícone |
-| 4 | Gestor aprova | Selo do operador muda para “Aparelho autorizado” ao atualizar |
+| 3 | Operador sem autorização: Conta → Solicitar autorização | Selo “Aguardando aprovação”; “Pedido enviado em … às …” |
+| 4 | Gestor entra no app | Faixa “1 aparelho aguardando aprovação”; número na aba Aparelhos |
+| 4a | Gestor toca “Ver agora” e aprova | Selo do operador muda para “Aparelho autorizado” ao atualizar |
 | 5 | Tentar avançar etapa vazia | Campos em vermelho e lista “Faltam N informações” |
 | 6 | Checklist com Sim, Não e N/A | Nenhum bloqueio; N/A pede justificativa; tela rola para o próximo item |
 | 7 | Medição inicial fora do limite (ex.: O₂ 19,1) | Aviso amarelo e teste após ventilação aparece |
@@ -132,6 +143,13 @@ Marque cada item em pelo menos um Android e, se a equipe usar, um iPhone.
 | 18 | Ficar sem internet e abrir o app | Continua conectado; faixa “Sem conexão”; dá para preencher |
 | 19 | Validar PET recebida (Gestão) com PDF + JSON | “Documento válido” |
 | 20 | Negar a localização quando o celular pedir | A PET é emitida; o PDF mostra “Geolocalização: não obtida” |
+| 21 | Operador da unidade abre a etapa 1 | “Nome da unidade” preenchido com a unidade do cadastro, sem poder editar |
+| 22 | Operador com aparelho ativo pede outro aparelho | Gestor vê o aviso “Já tem um aparelho ativo” e as opções “Aprovar e revogar o anterior” e “Manter os dois” |
+| 23 | Gestor recusa um pedido com motivo | Operador vê o motivo e o botão “Enviar novo pedido” |
+| 24 | Gestor revoga um aparelho com motivo | Aparece em Revogados com data, responsável e motivo; o operador vê a orientação de pedir reativação |
+| 25 | Verificador abre Conferência | Só PETs da própria unidade; busca por número, local ou emissor |
+| 26 | Verificador valida PDF + JSON de outra unidade | “Documento autêntico”, sem nome do emissor |
+| 27 | Gestor tenta desativar unidade com usuários | Mensagem pedindo para mover os usuários antes |
 
 ---
 

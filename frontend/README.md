@@ -1,4 +1,4 @@
-# Frontend — PET-Digital NR-33 v1.2.0
+# Frontend — PET-Digital NR-33 v1.3.0
 
 Publique **todos os arquivos desta pasta** no Cloudflare Pages, inclusive `_headers`.
 
@@ -7,9 +7,10 @@ Publique **todos os arquivos desta pasta** no Cloudflare Pages, inclusive `_head
 O `index.html` carrega apenas arquivos locais, nesta ordem:
 
 1. `app-core.js` — constantes, armazenamento, criptografia, avisos na tela, tentativa pendente;
-2. `app-system.js` — sessão, conta, aparelho, gestão e chamadas da API;
-3. `app-form.js` — etapas, checklist, medições, equipe, assinatura, revisão e emissão;
-4. `app-output.js` — PDF, arquivo de validação, Minhas PETs, validação e inicialização.
+2. `app-system.js` — sessão, conta, aparelho próprio, usuários e chamadas da API;
+3. `app-gestao.js` — aba Aparelhos, unidades, PETs registradas e aviso de pedidos pendentes (v1.3.0);
+4. `app-form.js` — etapas, checklist, medições, equipe, assinatura, revisão e emissão;
+5. `app-output.js` — PDF, arquivo de validação, Minhas PETs, validação e inicialização.
 
 Não há bibliotecas externas.
 
@@ -26,7 +27,7 @@ Não há bibliotecas externas.
 
 - `_headers` aplica CSP e demais cabeçalhos; `script-src` e `style-src` aceitam só `'self'` (por isso não há estilo inline).
 - O Service Worker guarda apenas arquivos estáticos; respostas da API nunca ficam offline.
-- Cache atual: `pet-digital-static-v1.2.0`.
+- Cache atual: `pet-digital-static-v1.3.0`.
 
 ## Regra do checklist
 

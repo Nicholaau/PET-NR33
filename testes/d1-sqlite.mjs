@@ -1,5 +1,5 @@
 /**
- * PET-Digital v1.2.0 — banco D1 simulado para testes locais.
+ * PET-Digital v1.3.0 — banco D1 simulado para testes locais.
  *
  * O quê: imita a parte da API do Cloudflare D1 usada pelo Worker (prepare/bind/first/all/run/batch).
  * Como: usa o SQLite que já vem no Node 22 (`node:sqlite`), sem instalar nada.
@@ -59,7 +59,7 @@ export class D1Sqlite {
 
 /**
  * Cria um banco novo e aplica as migrations de uma instalação nova:
- * 0001 (esquema), 0003 (segurança) e 0004 (endurecimento). A 0002 só serve para bases antigas.
+ * 0001 (esquema), 0003 (segurança), 0004 (endurecimento) e 0005 (unidades). A 0002 só serve para bases antigas.
  */
 export function createTestDatabase(migrationsDir, file = ':memory:') {
   const d1 = new D1Sqlite(file);

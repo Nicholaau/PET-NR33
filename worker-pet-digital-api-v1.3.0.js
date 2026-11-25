@@ -1,5 +1,16 @@
 /**
- * PET-Digital NR-33 v1.2.0 — Worker/API Cloudflare comentado.
+ * PET-Digital NR-33 v1.3.0 — Worker/API Cloudflare comentado.
+ *
+ * Mudanças da v1.3.0 (exige a migration 0005):
+ * - Unidades padronizadas (tabela `units`): gestor e admin criam, renomeiam e desativam. Não há exclusão.
+ * - Todo operacional e verificador pertence a uma unidade da lista. Gestor e admin podem ficar sem unidade (empresa toda).
+ * - A PET grava a unidade do emissor no servidor, além de data, local, trabalho e supervisor para a lista de conferência.
+ * - Verificador lista, consulta e valida apenas PETs da própria unidade. Documento de outra unidade:
+ *   confirma só a autenticidade, sem detalhes.
+ * - GET /pet-records lista PETs registradas (verificador: unidade; gestor/admin: todas, com filtro).
+ * - Aparelhos: filtros (pendentes, ativos, revogados, sem uso), busca, paginação, contadores,
+ *   "aprovar e revogar o anterior", motivo de revogação, recusa distinta de revogação e novo pedido após recusa.
+ * - Mapeamento das unidades escritas à mão nos cadastros antigos (admin).
  *
  * Mudanças da v1.2.0:
  * - CORS aceita também os endereços de publicação de teste do Pages (ex.: https://abc123.pet-digital.pages.dev),
@@ -69,7 +80,15 @@ const ACCEPTED_VALIDATION_PROFILES = new Set(['PET-DIGITAL-NR33-v1', 'PET-DIGITA
 const CANONICALIZATION_ALGORITHM = 'JSON_CANONICAL_STABLE_STRINGIFY_V1';
 const HASH_ALGORITHM = 'SHA-256';
 const SIGNATURE_ALGORITHM = 'ECDSA-P256-SHA256';
-const API_VERSION = '1.2.0';
+const API_VERSION = '1.3.0';
+// Paginação padrão das listas de gestão.
+const PAGE_SIZE_DEFAULT = 15;
+const PAGE_SIZE_MAX = 50;
+// Aparelho ativo sem uso há mais deste número de dias aparece no filtro "Sem uso".
+const DEVICE_IDLE_DAYS = 60;
+const UNIT_TYPES = ['unidade', 'equipe', 'nucleo'];
+// Consulta padrão de usuário com o nome da unidade oficial.
+const USER_SELECT = `SELECT u.*, un.name AS unit_name, un.status AS unit_status FROM app_users u LEFT JOIN units un ON un.id = u.unit_id`;
 
 export default {
   /**
@@ -141,12 +160,19 @@ async function route(request, env, url) {
   if (request.method === 'POST' && path.startsWith('/users/') && path.endsWith('/reset-password')) return resetUserPassword(request, env, path.split('/')[2]);
   if (request.method === 'DELETE' && /^\/users\/[^/]+$/.test(path)) return deleteUserAccess(request, env, path.split('/')[2]);
 
+  if (request.method === 'GET' && path === '/units') return listUnits(request, env, url);
+  if (request.method === 'POST' && path === '/units') return createUnit(request, env);
+  if (request.method === 'GET' && path === '/units/legacy') return listLegacyUnits(request, env);
+  if (request.method === 'POST' && path === '/units/legacy-map') return mapLegacyUnit(request, env);
+  if (request.method === 'PATCH' && /^\/units\/[^/]+$/.test(path)) return updateUnit(request, env, path.split('/')[2]);
+
   if (request.method === 'POST' && path === '/devices/register') return registerDevice(request, env);
-  if (request.method === 'GET' && path === '/devices') return listDevices(request, env);
+  if (request.method === 'GET' && path === '/devices') return listDevices(request, env, url);
   if (request.method === 'POST' && path.startsWith('/devices/') && path.endsWith('/approve')) return approveDevice(request, env, path.split('/')[2]);
   if (request.method === 'POST' && path.startsWith('/devices/') && path.endsWith('/revoke')) return revokeDevice(request, env, path.split('/')[2]);
 
   if (request.method === 'POST' && path === '/pet-records') return createPetRecord(request, env);
+  if (request.method === 'GET' && path === '/pet-records') return listPetRecords(request, env, url);
   if (request.method === 'GET' && path.startsWith('/pet-records/')) return getPetRecord(request, env, decodeURIComponent(path.split('/')[2] || ''));
   if (request.method === 'POST' && path === '/validate') return validateHash(request, env);
   if (request.method === 'POST' && path === '/validate-document') return validateDocument(request, env);
@@ -193,7 +219,7 @@ async function login(request, env) {
   // Limites independentes por matrícula e por IP são conferidos antes do PBKDF2.
   const rateScopes = await assertLoginAllowed(request, env, matricula);
 
-  const user = await env.DB.prepare('SELECT * FROM app_users WHERE matricula = ?').bind(matricula).first();
+  const user = await env.DB.prepare(`${USER_SELECT} WHERE u.matricula = ?`).bind(matricula).first();
   if (!user || user.status !== 'active') {
     const block = await recordLoginFailure(env, rateScopes);
     await audit(env, user?.id || null, 'auth_login', 'app_users', user?.id || null, block.blocked ? 'blocked' : 'failure', request, { reason: 'inactive_or_not_found', matricula });
@@ -289,7 +315,7 @@ async function changeOwnPassword(request, env) {
   await env.DB.prepare('UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND id <> ? AND revoked_at IS NULL')
     .bind(nowIso(), auth.user.id, auth.session.id).run();
   await audit(env, auth.user.id, 'password_change_own', 'app_users', auth.user.id, 'success', request, {});
-  const updated = await env.DB.prepare('SELECT * FROM app_users WHERE id = ?').bind(auth.user.id).first();
+  const updated = await getUserOr404(env, auth.user.id);
   return json({ ok: true, user: publicUser(updated) });
 }
 
@@ -300,7 +326,9 @@ async function changeOwnPassword(request, env) {
  */
 async function listUsers(request, env) {
   const auth = await requireRole(request, env, ['admin', 'gestor']);
-  const rows = await env.DB.prepare(`SELECT id, name, matricula, email, role, unit, status, must_change_password, created_at, updated_at, last_login_at FROM app_users ORDER BY CASE role WHEN 'admin' THEN 1 WHEN 'gestor' THEN 2 WHEN 'verificador' THEN 3 ELSE 4 END, name`).all();
+  const rows = await env.DB.prepare(`SELECT u.id, u.name, u.matricula, u.email, u.role, u.unit, u.unit_id, un.name AS unit_name, u.status, u.must_change_password, u.created_at, u.updated_at, u.last_login_at
+    FROM app_users u LEFT JOIN units un ON un.id = u.unit_id
+    ORDER BY CASE u.role WHEN 'admin' THEN 1 WHEN 'gestor' THEN 2 WHEN 'verificador' THEN 3 ELSE 4 END, u.name`).all();
   await audit(env, auth.user.id, 'users_list', 'app_users', null, 'success', request, {});
   return json({ ok: true, users: rows.results.map(publicUser) });
 }
@@ -318,18 +346,20 @@ async function createUser(request, env) {
   assertPassword(body.password);
   const role = clean(body.role || 'operacional');
   assertRoleAllowedForActor(auth.user, role);
+  // v1.3.0: a unidade vem da lista oficial. Obrigatória para operacional e verificador.
+  const unit = await resolveUnitForUser(env, clean(body.unitId) || null, role, null);
 
   const password = await hashPassword(body.password, env);
   const id = crypto.randomUUID();
   try {
-    await env.DB.prepare(`INSERT INTO app_users (id, name, matricula, email, role, unit, status, password_hash, password_salt, password_alg, must_change_password, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, 1, ?)`)
-      .bind(id, clean(body.name), clean(body.matricula), clean(body.email || null), role, clean(body.unit || null), password.hash, password.salt, password.alg, nowIso()).run();
+    await env.DB.prepare(`INSERT INTO app_users (id, name, matricula, email, role, unit, unit_id, status, password_hash, password_salt, password_alg, must_change_password, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, 1, ?)`)
+      .bind(id, clean(body.name), clean(body.matricula), clean(body.email) || null, role, unit?.name || null, unit?.id || null, password.hash, password.salt, password.alg, nowIso()).run();
   } catch (e) {
     throw httpError(409, 'Não foi possível cadastrar. Verifique se matrícula ou e-mail já estão em uso.');
   }
-  await audit(env, auth.user.id, 'user_create', 'app_users', id, 'success', request, { role, matricula: clean(body.matricula) });
-  const created = await env.DB.prepare('SELECT * FROM app_users WHERE id = ?').bind(id).first();
+  await audit(env, auth.user.id, 'user_create', 'app_users', id, 'success', request, { role, matricula: clean(body.matricula), unitId: unit?.id || null });
+  const created = await getUserOr404(env, id);
   return json({ ok: true, user: publicUser(created) }, 201);
 }
 
@@ -347,25 +377,33 @@ async function updateUser(request, env, userId) {
   const name = clean(body.name ?? target.name);
   const matricula = clean(body.matricula ?? target.matricula);
   const email = body.email !== undefined ? (clean(body.email) || null) : (target.email || null);
-  const unit = body.unit !== undefined ? (clean(body.unit) || null) : (target.unit || null);
   const role = clean(body.role ?? target.role);
   const status = clean(body.status ?? target.status);
   assertText(name, 'Nome obrigatório.');
   assertText(matricula, 'Matrícula obrigatória.');
   assertRoleAllowedForActor(auth.user, role);
   if (!['pending', 'active', 'suspended', 'disabled'].includes(status)) throw httpError(400, 'Situação inválida.');
+  // v1.3.0: unidade da lista oficial. Manter a unidade atual é permitido mesmo se ela foi desativada.
+  const requestedUnitId = body.unitId !== undefined ? (clean(body.unitId) || null) : (target.unit_id || null);
+  const unitRecord = await resolveUnitForUser(env, requestedUnitId, role, target.unit_id || null);
+  const unitId = unitRecord?.id || null;
+  const unit = unitRecord ? unitRecord.name : (target.unit_id ? null : (target.unit || null));
 
   if (target.role === 'admin' && (role !== 'admin' || status !== 'active')) await ensureAnotherActiveAdmin(env, target.id);
   if (target.id === auth.user.id && status !== 'active') throw httpError(400, 'Não é permitido desativar a própria conta durante a sessão.');
 
   try {
-    await env.DB.prepare(`UPDATE app_users SET name = ?, matricula = ?, email = ?, role = ?, unit = ?, status = ?, updated_at = ? WHERE id = ?`)
-      .bind(name, matricula, email, role, unit, status, nowIso(), userId).run();
+    await env.DB.prepare(`UPDATE app_users SET name = ?, matricula = ?, email = ?, role = ?, unit = ?, unit_id = ?, status = ?, updated_at = ? WHERE id = ?`)
+      .bind(name, matricula, email, role, unit, unitId, status, nowIso(), userId).run();
   } catch (e) {
     throw httpError(409, 'Não foi possível atualizar. Verifique se matrícula ou e-mail já estão em uso.');
   }
+  // PETs antigas de quem ainda não tinha unidade passam para a unidade agora definida.
+  if (unitId && !target.unit_id) {
+    await env.DB.prepare('UPDATE pet_records SET unit_id = ?, unit_name = ? WHERE created_by_user_id = ? AND unit_id IS NULL').bind(unitId, unitRecord.name, userId).run();
+  }
   if (status !== 'active') await revokeUserSessions(env, userId);
-  await audit(env, auth.user.id, 'user_update', 'app_users', userId, 'success', request, { role, status, matricula });
+  await audit(env, auth.user.id, 'user_update', 'app_users', userId, 'success', request, { role, status, matricula, unitId, previousUnitId: target.unit_id || null });
   const updated = await getUserOr404(env, userId);
   return json({ ok: true, user: publicUser(updated) });
 }
@@ -449,73 +487,161 @@ async function registerDevice(request, env) {
   if (recalculated !== publicKeyHash) throw httpError(400, 'Código do dispositivo não confere.');
 
   const existing = await env.DB.prepare('SELECT * FROM device_keys WHERE public_key_hash = ?').bind(publicKeyHash).first();
+  const userAgent = (request.headers.get('user-agent') || '').slice(0, 400);
   if (existing) {
-    if (existing.user_id !== auth.user.id) throw httpError(409, 'Este dispositivo já está vinculado a outro usuário. Um gestor/admin deve revogar o vínculo anterior.');
+    if (existing.user_id !== auth.user.id) throw httpError(409, 'Este aparelho já está vinculado a outro usuário. Peça ao gestor para revogar o vínculo anterior.');
     await env.DB.prepare('UPDATE device_keys SET device_label = ? WHERE id = ?').bind(clean(body.deviceLabel), existing.id).run();
+    if (['revoked', 'lost'].includes(existing.status)) {
+      // v1.3.0: pedido recusado (nunca aprovado) pode ser refeito; aparelho revogado depois de aprovado exige reativação.
+      if (!existing.approved_at) {
+        await env.DB.prepare(`UPDATE device_keys SET status = 'pending', created_at = ?, revoked_by = NULL, revoked_at = NULL, revoke_reason = NULL, request_user_agent = ? WHERE id = ?`)
+          .bind(nowIso(), userAgent, existing.id).run();
+        await audit(env, auth.user.id, 'device_register', 'device_keys', existing.id, 'success', request, { status: 'pending', publicKeyHash, reRequestAfterRefusal: true, previousReason: existing.revoke_reason || null });
+        const again = await env.DB.prepare('SELECT * FROM device_keys WHERE id = ?').bind(existing.id).first();
+        return json({ ok: true, device: again, message: 'Novo pedido enviado. Agora é só aguardar a aprovação do gestor.' });
+      }
+      const when = existing.revoked_at ? ` em ${formatBrDate(existing.revoked_at)}` : '';
+      throw httpError(409, `A autorização deste aparelho foi revogada${when}. Peça ao gestor para reativá-la; não é preciso fazer novo pedido.`);
+    }
     const refreshed = await env.DB.prepare('SELECT * FROM device_keys WHERE id = ?').bind(existing.id).first();
-    if (['revoked', 'lost'].includes(refreshed.status)) throw httpError(409, 'Este dispositivo já foi revogado. Solicite a reativação a um gestor/admin; não é necessário cadastrá-lo novamente.');
-    return json({ ok: true, device: refreshed, alreadyExists: true, message: refreshed.status === 'active' ? 'Dispositivo já autorizado.' : 'Solicitação já enviada e aguardando aprovação.' });
+    return json({ ok: true, device: refreshed, alreadyExists: true, message: refreshed.status === 'active' ? 'Aparelho já autorizado.' : 'O pedido já foi enviado e aguarda aprovação.' });
   }
 
   const status = ['admin', 'gestor'].includes(auth.user.role) ? 'active' : 'pending';
   const id = crypto.randomUUID();
-  await env.DB.prepare(`INSERT INTO device_keys (id, user_id, device_label, public_key_jwk, public_key_hash, algorithm, status, created_at, approved_by, approved_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(id, auth.user.id, clean(body.deviceLabel), JSON.stringify(body.publicKeyJwk), publicKeyHash, clean(body.algorithm || 'ECDSA-P256-SHA256'), status, nowIso(), status === 'active' ? auth.user.id : null, status === 'active' ? nowIso() : null).run();
+  await env.DB.prepare(`INSERT INTO device_keys (id, user_id, device_label, public_key_jwk, public_key_hash, algorithm, status, created_at, approved_by, approved_at, request_user_agent)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(id, auth.user.id, clean(body.deviceLabel), JSON.stringify(body.publicKeyJwk), publicKeyHash, clean(body.algorithm || 'ECDSA-P256-SHA256'), status, nowIso(), status === 'active' ? auth.user.id : null, status === 'active' ? nowIso() : null, userAgent).run();
   await audit(env, auth.user.id, 'device_register', 'device_keys', id, 'success', request, { status, publicKeyHash });
   const device = await env.DB.prepare('SELECT * FROM device_keys WHERE id = ?').bind(id).first();
-  return json({ ok: true, device, message: status === 'active' ? 'Dispositivo configurado e autorizado.' : 'Dispositivo configurado. A solicitação foi enviada para aprovação.' }, 201);
+  return json({ ok: true, device, message: status === 'active' ? 'Aparelho configurado e autorizado.' : 'Pedido enviado. Agora é só aguardar a aprovação do gestor.' }, 201);
 }
 
 /**
- * O quê: lista dispositivos.
- * Como: admin/gestor veem a equipe; operacional/verificador veem somente os próprios.
- * Quando: atualização do status do aparelho ou gestão das autorizações pendentes.
+ * O quê: lista aparelhos.
+ * Como (v1.3.0):
+ * - `?mine=1` (ou perfil operacional/verificador): só os aparelhos do próprio usuário, sem paginação.
+ * - `?view=manage` (gestor/admin): filtro `status` (pending | active | revoked | inactive | all), busca `q`
+ *   por nome, matrícula ou nome do aparelho, paginação (`page`, `pageSize`) e contadores por situação.
+ *   Gestor vê aparelhos de operacionais e verificadores; admin vê todos.
+ * - Sem parâmetros (aplicativo anterior à v1.3.0): lista completa, como antes.
+ * Quando: selo do aparelho, aba Conta e aba Aparelhos.
  */
-async function listDevices(request, env) {
+async function listDevices(request, env, url) {
   const auth = await requireAuth(request, env);
   const isAdmin = auth.user.role === 'admin';
-  const isManager = auth.user.role === 'gestor';
-  const where = isAdmin ? '' : isManager ? "WHERE u.role IN ('operacional','verificador')" : 'WHERE dk.user_id = ?';
-  const sql = `SELECT dk.id, dk.user_id, u.name AS user_name, u.matricula AS user_matricula, u.role AS user_role, u.status AS user_status, dk.device_label, dk.public_key_hash, dk.algorithm, dk.status, dk.created_at, dk.approved_at, dk.revoked_at, dk.last_used_at
-    FROM device_keys dk LEFT JOIN app_users u ON u.id = dk.user_id ${where} ORDER BY CASE dk.status WHEN 'pending' THEN 1 WHEN 'active' THEN 2 ELSE 3 END, dk.created_at DESC`;
-  const stmt = env.DB.prepare(sql);
-  const rows = (isAdmin || isManager) ? await stmt.all() : await stmt.bind(auth.user.id).all();
-  return json({ ok: true, devices: rows.results });
+  const isManager = isAdmin || auth.user.role === 'gestor';
+  const params = url.searchParams;
+  const columns = `dk.id, dk.user_id, u.name AS user_name, u.matricula AS user_matricula, u.role AS user_role, u.status AS user_status,
+      un.name AS user_unit_name, dk.device_label, dk.public_key_hash, dk.algorithm, dk.status, dk.created_at, dk.approved_at, dk.revoked_at,
+      dk.revoke_reason, dk.last_used_at, dk.request_user_agent, ab.name AS approved_by_name, rb.name AS revoked_by_name,
+      (SELECT COUNT(*) FROM device_keys o WHERE o.user_id = dk.user_id AND o.status = 'active' AND o.id <> dk.id) AS other_active_count,
+      (SELECT o.device_label FROM device_keys o WHERE o.user_id = dk.user_id AND o.status = 'active' AND o.id <> dk.id ORDER BY COALESCE(o.last_used_at, o.approved_at) DESC LIMIT 1) AS other_active_label,
+      (SELECT o.last_used_at FROM device_keys o WHERE o.user_id = dk.user_id AND o.status = 'active' AND o.id <> dk.id ORDER BY COALESCE(o.last_used_at, o.approved_at) DESC LIMIT 1) AS other_active_last_used`;
+  const from = `FROM device_keys dk LEFT JOIN app_users u ON u.id = dk.user_id LEFT JOIN units un ON un.id = u.unit_id
+      LEFT JOIN app_users ab ON ab.id = dk.approved_by LEFT JOIN app_users rb ON rb.id = dk.revoked_by`;
+
+  if (!isManager || params.get('mine') === '1') {
+    const rows = await env.DB.prepare(`SELECT ${columns} ${from} WHERE dk.user_id = ? ORDER BY dk.created_at DESC`).bind(auth.user.id).all();
+    return json({ ok: true, devices: rows.results.map(decorateDevice) });
+  }
+
+  const scope = isAdmin ? '1 = 1' : "u.role IN ('operacional','verificador')";
+  if (params.get('view') !== 'manage') {
+    const rows = await env.DB.prepare(`SELECT ${columns} ${from} WHERE ${isAdmin ? '1 = 1' : `(${scope} OR dk.user_id = ?)`}
+      ORDER BY CASE dk.status WHEN 'pending' THEN 1 WHEN 'active' THEN 2 ELSE 3 END, dk.created_at DESC`);
+    const result = isAdmin ? await rows.all() : await rows.bind(auth.user.id).all();
+    return json({ ok: true, devices: result.results.map(decorateDevice) });
+  }
+
+  const idleCutoff = new Date(Date.now() - DEVICE_IDLE_DAYS * 86400000).toISOString();
+  const idleExpr = `(dk.status = 'active' AND COALESCE(dk.last_used_at, dk.approved_at, dk.created_at) < ?)`;
+  const countsRow = await env.DB.prepare(`SELECT
+      SUM(CASE WHEN dk.status = 'pending' THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN dk.status = 'active' THEN 1 ELSE 0 END) AS active,
+      SUM(CASE WHEN dk.status IN ('revoked','lost') THEN 1 ELSE 0 END) AS revoked,
+      SUM(CASE WHEN ${idleExpr} THEN 1 ELSE 0 END) AS inactive
+    ${from} WHERE ${scope}`).bind(idleCutoff).first();
+  const counts = {
+    pending: Number(countsRow?.pending || 0), active: Number(countsRow?.active || 0),
+    revoked: Number(countsRow?.revoked || 0), inactive: Number(countsRow?.inactive || 0)
+  };
+
+  const status = ['pending', 'active', 'revoked', 'inactive', 'all'].includes(params.get('status')) ? params.get('status') : 'pending';
+  const where = [scope];
+  const binds = [];
+  if (status === 'pending') where.push("dk.status = 'pending'");
+  if (status === 'active') where.push("dk.status = 'active'");
+  if (status === 'revoked') where.push("dk.status IN ('revoked','lost')");
+  if (status === 'inactive') { where.push(idleExpr); binds.push(idleCutoff); }
+  const q = searchTerm(params.get('q'));
+  if (q) { where.push("(u.name LIKE ? ESCAPE '\\' OR u.matricula LIKE ? ESCAPE '\\' OR dk.device_label LIKE ? ESCAPE '\\')"); binds.push(q, q, q); }
+  const { page, pageSize, offset } = pagination(params);
+  const whereSql = where.join(' AND ');
+  const totalRow = await env.DB.prepare(`SELECT COUNT(*) AS count ${from} WHERE ${whereSql}`).bind(...binds).first();
+  const order = status === 'pending' ? 'dk.created_at ASC'
+    : status === 'revoked' ? 'dk.revoked_at DESC'
+    : status === 'inactive' ? 'COALESCE(dk.last_used_at, dk.approved_at, dk.created_at) ASC'
+    : 'u.name, dk.created_at DESC';
+  const rows = await env.DB.prepare(`SELECT ${columns} ${from} WHERE ${whereSql} ORDER BY ${order} LIMIT ? OFFSET ?`).bind(...binds, pageSize, offset).all();
+  const total = Number(totalRow?.count || 0);
+  return json({ ok: true, devices: rows.results.map(decorateDevice), counts, status, total, page, pageSize, pages: Math.max(1, Math.ceil(total / pageSize)), idleDays: DEVICE_IDLE_DAYS });
+}
+
+/** Acrescenta à linha do aparelho a indicação de pedido recusado (revogado sem nunca ter sido aprovado). */
+function decorateDevice(row) {
+  return { ...row, refused: ['revoked', 'lost'].includes(row.status) && !row.approved_at, other_active_count: Number(row.other_active_count || 0) };
 }
 
 /**
- * O quê: aprova ou reativa um dispositivo.
- * Como: admin/gestor clicam uma única vez; o status passa imediatamente para active.
- * Quando: solicitação pendente ou reativação deliberada de aparelho revogado.
+ * O quê: aprova ou reativa um aparelho.
+ * Como: o status passa a active. Com `revokeOthers: true`, os demais aparelhos ativos do mesmo usuário
+ * são revogados no mesmo lote, com o motivo "Troca de aparelho". Ter mais de um aparelho é permitido.
+ * Quando: pedido pendente, reativação ou troca de celular.
  */
 async function approveDevice(request, env, deviceId) {
   const auth = await requireRole(request, env, ['admin', 'gestor']);
+  const body = await readJson(request).catch(() => ({}));
   const device = await env.DB.prepare(`SELECT dk.*, u.role AS user_role, u.status AS user_status FROM device_keys dk JOIN app_users u ON u.id = dk.user_id WHERE dk.id = ?`).bind(deviceId).first();
-  if (!device) throw httpError(404, 'Dispositivo não encontrado.');
+  if (!device) throw httpError(404, 'Aparelho não encontrado.');
   assertCanManageDevice(auth.user, device);
-  if (device.user_status !== 'active') throw httpError(400, 'O usuário deste dispositivo não está ativo.');
-  if (device.status === 'active') return json({ ok: true, alreadyActive: true, message: 'O dispositivo já estava autorizado.' });
-  await env.DB.prepare(`UPDATE device_keys SET status = 'active', approved_by = ?, approved_at = ?, revoked_by = NULL, revoked_at = NULL, revoke_reason = NULL WHERE id = ?`).bind(auth.user.id, nowIso(), deviceId).run();
-  await audit(env, auth.user.id, 'device_approve', 'device_keys', deviceId, 'success', request, { previousStatus: device.status });
-  return json({ ok: true, message: 'Dispositivo autorizado. Não há outra etapa necessária.' });
+  if (device.user_status !== 'active') throw httpError(400, 'O usuário deste aparelho não está ativo.');
+  if (device.status === 'active') return json({ ok: true, alreadyActive: true, message: 'O aparelho já estava autorizado.' });
+  const now = nowIso();
+  const statements = [
+    env.DB.prepare(`UPDATE device_keys SET status = 'active', approved_by = ?, approved_at = ?, revoked_by = NULL, revoked_at = NULL, revoke_reason = NULL WHERE id = ?`).bind(auth.user.id, now, deviceId)
+  ];
+  let replaced = 0;
+  if (body.revokeOthers === true) {
+    const others = await env.DB.prepare(`SELECT COUNT(*) AS count FROM device_keys WHERE user_id = ? AND status = 'active' AND id <> ?`).bind(device.user_id, deviceId).first();
+    replaced = Number(others?.count || 0);
+    statements.push(env.DB.prepare(`UPDATE device_keys SET status = 'revoked', revoked_by = ?, revoked_at = ?, revoke_reason = 'Troca de aparelho' WHERE user_id = ? AND status = 'active' AND id <> ?`).bind(auth.user.id, now, device.user_id, deviceId));
+  }
+  await env.DB.batch(statements);
+  await audit(env, auth.user.id, 'device_approve', 'device_keys', deviceId, 'success', request, { previousStatus: device.status, revokedOthers: replaced });
+  const message = replaced
+    ? `Aparelho autorizado. ${replaced === 1 ? 'O aparelho anterior foi revogado' : `Os ${replaced} aparelhos anteriores foram revogados`} (troca de aparelho).`
+    : device.status === 'pending' ? 'Aparelho autorizado.' : 'Aparelho reativado.';
+  return json({ ok: true, message, revokedOthers: replaced });
 }
 
 /**
- * O quê: revoga ou rejeita um dispositivo.
- * Como: admin/gestor marcam como revoked e registram motivo, data e responsável.
- * Quando: perda/troca de aparelho, solicitação indevida ou encerramento de acesso.
+ * O quê: revoga um aparelho ativo ou recusa um pedido pendente.
+ * Como: grava status revoked com motivo, data e responsável. Pedido recusado é o que nunca foi aprovado.
+ * Quando: troca, perda ou roubo, desligamento, pedido não reconhecido.
  */
 async function revokeDevice(request, env, deviceId) {
   const auth = await requireRole(request, env, ['admin', 'gestor']);
   const body = await readJson(request).catch(() => ({}));
   const device = await env.DB.prepare(`SELECT dk.*, u.role AS user_role, u.status AS user_status FROM device_keys dk JOIN app_users u ON u.id = dk.user_id WHERE dk.id = ?`).bind(deviceId).first();
-  if (!device) throw httpError(404, 'Dispositivo não encontrado.');
+  if (!device) throw httpError(404, 'Aparelho não encontrado.');
   assertCanManageDevice(auth.user, device);
-  if (device.status === 'revoked') return json({ ok: true, alreadyRevoked: true, message: 'O dispositivo já estava revogado.' });
-  await env.DB.prepare(`UPDATE device_keys SET status = 'revoked', revoked_by = ?, revoked_at = ?, revoke_reason = ? WHERE id = ?`).bind(auth.user.id, nowIso(), clean(body.reason || (device.status === 'pending' ? 'Solicitação rejeitada' : 'Revogação manual')), deviceId).run();
-  await audit(env, auth.user.id, 'device_revoke', 'device_keys', deviceId, 'success', request, { previousStatus: device.status });
-  return json({ ok: true, message: device.status === 'pending' ? 'Solicitação rejeitada.' : 'Dispositivo revogado.' });
+  if (['revoked', 'lost'].includes(device.status)) return json({ ok: true, alreadyRevoked: true, message: 'O aparelho já estava revogado.' });
+  const refusing = device.status === 'pending';
+  const reason = (clean(body.reason) || (refusing ? 'Pedido recusado' : 'Revogação manual')).slice(0, 200);
+  await env.DB.prepare(`UPDATE device_keys SET status = 'revoked', revoked_by = ?, revoked_at = ?, revoke_reason = ? WHERE id = ?`).bind(auth.user.id, nowIso(), reason, deviceId).run();
+  await audit(env, auth.user.id, refusing ? 'device_refuse' : 'device_revoke', 'device_keys', deviceId, 'success', request, { previousStatus: device.status, reason });
+  return json({ ok: true, message: refusing ? 'Pedido recusado.' : 'Aparelho revogado.' });
 }
 
 /**
@@ -656,8 +782,9 @@ async function createPetRecord(request, env) {
       id, numero_pet, created_by_user_id, signing_key_id, validation_profile, schema_version,
       payload_hash, pdf_hash, json_hash, pdf_proof_hash, pet_signature_b64, pdf_proof_signature_b64,
       client_generated_at, server_received_at, client_timezone, ip_address, user_agent,
-      geo_lat, geo_lng, geo_accuracy_m, status, notes, idempotency_key, participant_count
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?, ?)`)
+      geo_lat, geo_lng, geo_accuracy_m, status, notes, idempotency_key, participant_count,
+      unit_id, unit_name, pet_date, pet_local, pet_trabalho, pet_supervisor
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(
         id, numeroPet, auth.user.id, device.id, validationProfile, schemaVersion,
         payloadHash, pdfHash, jsonHash, pdfProofHash, petSignatureB64, pdfProofSignatureB64,
@@ -665,7 +792,11 @@ async function createPetRecord(request, env) {
         clean(proof.timezone || null), clientIp(request), request.headers.get('user-agent') || '',
         geo ? Number(geo.latitude) : null, geo ? Number(geo.longitude) : null,
         geo ? Number(geo.accuracyMeters ?? geo.accuracy ?? 0) : null,
-        null, idempotencyKey, participantRows.length
+        null, idempotencyKey, participantRows.length,
+        // v1.3.0: unidade do emissor no momento do registro (definida no servidor) e dados para a lista.
+        auth.user.unitId || null, auth.user.unitName || null,
+        shortText(payload.fields?.data, 10), shortText(payload.fields?.local, 200),
+        shortText(payload.fields?.trabalho, 300), shortText(payload.fields?.supervisorEntrada, 160)
       ),
     env.DB.prepare('UPDATE device_keys SET last_used_at = ? WHERE id = ?').bind(now, device.id)
   ];
@@ -719,15 +850,66 @@ async function createPetRecord(request, env) {
 }
 
 /**
+ * O quê: lista PETs registradas, com os dados gravados no servidor (sem arquivos).
+ * Como: verificador vê só a própria unidade; gestor e admin veem todas, com filtro `unitId`
+ * (`none` = sem unidade). Busca `q` por número, local, emissor ou matrícula. Paginação de 15.
+ * Quando: aba Conferência (verificador) e Gestão → PETs (gestor/admin).
+ */
+async function listPetRecords(request, env, url) {
+  const auth = await requireRole(request, env, ['admin', 'gestor', 'verificador']);
+  const params = url.searchParams;
+  const where = [];
+  const binds = [];
+  let scopeUnit = null;
+  if (auth.user.role === 'verificador') {
+    if (!auth.user.unitId) {
+      return json({ ok: true, items: [], total: 0, page: 1, pageSize: PAGE_SIZE_DEFAULT, pages: 1, scope: { unitId: null, unitName: null, missingUnit: true } });
+    }
+    where.push('pr.unit_id = ?'); binds.push(auth.user.unitId);
+    scopeUnit = { unitId: auth.user.unitId, unitName: auth.user.unitName };
+  } else {
+    const unitFilter = clean(params.get('unitId'));
+    if (unitFilter === 'none') where.push('pr.unit_id IS NULL');
+    else if (unitFilter) { where.push('pr.unit_id = ?'); binds.push(unitFilter); }
+  }
+  const q = searchTerm(params.get('q'));
+  if (q) {
+    where.push("(pr.numero_pet LIKE ? ESCAPE '\\' OR pr.pet_local LIKE ? ESCAPE '\\' OR u.name LIKE ? ESCAPE '\\' OR u.matricula LIKE ? ESCAPE '\\' OR pr.pet_supervisor LIKE ? ESCAPE '\\')");
+    binds.push(q, q, q, q, q);
+  }
+  const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  const from = 'FROM pet_records pr LEFT JOIN app_users u ON u.id = pr.created_by_user_id LEFT JOIN units un ON un.id = pr.unit_id';
+  const { page, pageSize, offset } = pagination(params);
+  const totalRow = await env.DB.prepare(`SELECT COUNT(*) AS count ${from} ${whereSql}`).bind(...binds).first();
+  const rows = await env.DB.prepare(`SELECT pr.id, pr.numero_pet, pr.status, pr.server_received_at, pr.client_generated_at, pr.pet_date, pr.pet_local,
+      pr.pet_trabalho, pr.pet_supervisor, pr.participant_count, pr.unit_id, COALESCE(pr.unit_name, un.name) AS unit_name,
+      u.name AS created_by_name, u.matricula AS created_by_matricula
+    ${from} ${whereSql} ORDER BY pr.server_received_at DESC LIMIT ? OFFSET ?`).bind(...binds, pageSize, offset).all();
+  const items = rows.results;
+  if (items.length) {
+    const placeholders = items.map(() => '?').join(',');
+    const team = await env.DB.prepare(`SELECT pet_record_id, participant_role, name FROM pet_participant_hashes WHERE pet_record_id IN (${placeholders})
+      ORDER BY CASE participant_role WHEN 'supervisor' THEN 1 WHEN 'entrante' THEN 2 ELSE 3 END, name`).bind(...items.map(i => i.id)).all();
+    for (const item of items) item.team = team.results.filter(t => t.pet_record_id === item.id).map(t => ({ role: t.participant_role, name: t.name }));
+  }
+  const total = Number(totalRow?.count || 0);
+  return json({ ok: true, items, total, page, pageSize, pages: Math.max(1, Math.ceil(total / pageSize)), scope: scopeUnit });
+}
+
+/**
  * O quê: consulta um registro de PET por número ou hash.
  * Como: exige perfil verificador/gestor/admin e retorna metadados gravados, sem arquivos sensíveis.
+ * v1.3.0: verificador só encontra PETs da própria unidade.
  * Quando: auditoria ou conferência posterior de uma PET recebida em PDF/JSON.
  */
 async function getPetRecord(request, env, numeroPet) {
-  await requireRole(request, env, ['admin', 'gestor', 'verificador']);
-  const record = await env.DB.prepare(`SELECT pr.id, pr.numero_pet, pr.payload_hash, pr.pdf_hash, pr.json_hash, pr.pdf_proof_hash, pr.validation_profile, pr.schema_version, pr.server_received_at, pr.client_generated_at, pr.ip_address, pr.geo_lat, pr.geo_lng, pr.geo_accuracy_m, pr.status, u.name AS created_by_name, u.matricula AS created_by_matricula, dk.public_key_hash
-    FROM pet_records pr LEFT JOIN app_users u ON u.id = pr.created_by_user_id LEFT JOIN device_keys dk ON dk.id = pr.signing_key_id WHERE pr.numero_pet = ? OR pr.payload_hash = ?`).bind(numeroPet, numeroPet).first();
-  if (!record) return json({ ok: true, found: false });
+  const auth = await requireRole(request, env, ['admin', 'gestor', 'verificador']);
+  const record = await env.DB.prepare(`SELECT pr.id, pr.numero_pet, pr.payload_hash, pr.pdf_hash, pr.json_hash, pr.pdf_proof_hash, pr.validation_profile, pr.schema_version, pr.server_received_at, pr.client_generated_at, pr.ip_address, pr.geo_lat, pr.geo_lng, pr.geo_accuracy_m, pr.status,
+      pr.unit_id, COALESCE(pr.unit_name, un.name) AS unit_name, pr.pet_date, pr.pet_local, pr.pet_trabalho, pr.pet_supervisor,
+      u.name AS created_by_name, u.matricula AS created_by_matricula, dk.public_key_hash
+    FROM pet_records pr LEFT JOIN app_users u ON u.id = pr.created_by_user_id LEFT JOIN device_keys dk ON dk.id = pr.signing_key_id LEFT JOIN units un ON un.id = pr.unit_id
+    WHERE pr.numero_pet = ? OR pr.payload_hash = ?`).bind(numeroPet, numeroPet).first();
+  if (!record || !canSeePetDetails(auth.user, record)) return json({ ok: true, found: false });
   const participants = await env.DB.prepare('SELECT participant_role, name, matricula, photo_hash, signature_image_hash, signed_at_client FROM pet_participant_hashes WHERE pet_record_id = ?').bind(record.id).all();
   return json({ ok: true, found: true, record, participants: participants.results });
 }
@@ -735,16 +917,20 @@ async function getPetRecord(request, env, numeroPet) {
 /**
  * O quê: consulta rápida por hash do payload.
  * Como: exige perfil de verificação e retorna apenas se o hash foi registrado no D1.
- * Quando: consulta manual na área Sistema.
+ * v1.3.0: PET de outra unidade, para o verificador, mostra só número e situação.
+ * Quando: consulta manual na área Gestão/Conferência.
  */
 async function validateHash(request, env) {
   const auth = await requireRole(request, env, ['admin', 'gestor', 'verificador']);
   const body = await readJson(request);
   const payloadHash = requiredHash(body.payloadHash, 'Hash inválido.');
-  const record = await env.DB.prepare(`SELECT pr.id, pr.numero_pet, pr.payload_hash, pr.pdf_hash, pr.json_hash, pr.status, pr.server_received_at, pr.client_generated_at,
+  const record = await env.DB.prepare(`SELECT pr.id, pr.numero_pet, pr.payload_hash, pr.pdf_hash, pr.json_hash, pr.status, pr.server_received_at, pr.client_generated_at, pr.unit_id,
       u.id AS created_by_user_id, u.name AS created_by_name, u.matricula AS created_by_matricula, dk.public_key_hash
     FROM pet_records pr JOIN app_users u ON u.id = pr.created_by_user_id JOIN device_keys dk ON dk.id = pr.signing_key_id
     WHERE pr.payload_hash = ?`).bind(payloadHash).first();
+  if (record && !canSeePetDetails(auth.user, record)) {
+    return json({ ok: true, found: true, limited: true, record: { numero_pet: record.numero_pet, status: record.status } });
+  }
   return json({ ok: true, found: !!record, record: record || null });
 }
 
@@ -835,9 +1021,20 @@ async function validateDocument(request, env) {
   const participantSetComplete = storedParticipantCount === dossierParticipantCount
     && storedParticipantCount === Number(record.participant_count ?? storedParticipantCount);
   const valid = record.status === 'accepted' && keyAuthorizedAtRegistration && petSignatureOk && proofSignatureOk && storedSignaturesMatch && participantSetComplete;
+  const limited = !canSeePetDetails(auth.user, record);
   await audit(env, auth.user.id, 'document_validate', 'pet_records', record.id, valid ? 'success' : 'failure', request, {
-    numeroPet, keyAuthorizedAtRegistration, petSignatureOk, proofSignatureOk, storedSignaturesMatch, participantSetComplete, currentKeyStatus: record.current_key_status
+    numeroPet, keyAuthorizedAtRegistration, petSignatureOk, proofSignatureOk, storedSignaturesMatch, participantSetComplete, currentKeyStatus: record.current_key_status, limited
   });
+  if (limited) {
+    // v1.3.0: verificador de outra unidade confirma a autenticidade, sem receber os detalhes do registro.
+    return json({
+      ok: true, valid, found: true, limited: true,
+      record: { numero_pet: record.numero_pet, status: record.status },
+      message: valid
+        ? 'Documento autêntico: PDF e arquivo de validação conferem com o registro do servidor. A PET é de outra unidade; os detalhes ficam restritos.'
+        : 'Registro encontrado, mas uma das verificações de autorização ou assinatura falhou. A PET é de outra unidade.'
+    });
+  }
   return json({
     ok: true,
     valid,
@@ -846,13 +1043,181 @@ async function validateDocument(request, env) {
     signaturesValid: petSignatureOk && proofSignatureOk && storedSignaturesMatch,
     participantSetComplete,
     currentKeyStatus: record.current_key_status,
-    record: publicPetRecord(record),
+    record: { ...publicPetRecord(record), unit_name: record.unit_name || null, pet_date: record.pet_date || null, pet_local: record.pet_local || null },
     issuer: { userId: record.created_by_user_id, name: record.created_by_name, matricula: record.created_by_matricula },
     calculated: { payloadHash, pdfHash, jsonHash, proofHash },
     message: valid
       ? 'PDF e arquivo de validação (JSON) confirmados no servidor, com emissor, dispositivo e assinaturas válidos.'
       : 'Registro encontrado, mas uma das verificações de autorização ou assinatura falhou.'
   });
+}
+
+/* ===================== Unidades (v1.3.0) ===================== */
+
+/**
+ * O quê: lista as unidades oficiais.
+ * Como: qualquer usuário logado recebe as ativas (id, nome, tipo). Gestor e admin recebem também
+ * as desativadas (`?all=1`) e a quantidade de usuários ativos em cada uma.
+ * Quando: cadastro de usuários, filtros de PETs e aba Gestão → Unidades.
+ */
+async function listUnits(request, env, url) {
+  const auth = await requireAuth(request, env);
+  const isManager = ['admin', 'gestor'].includes(auth.user.role);
+  const includeInactive = isManager && url.searchParams.get('all') === '1';
+  const rows = await env.DB.prepare(`SELECT un.id, un.name, un.type, un.status, un.created_at, un.updated_at,
+      (SELECT COUNT(*) FROM app_users u WHERE u.unit_id = un.id AND u.status <> 'disabled') AS user_count,
+      (SELECT COUNT(*) FROM pet_records pr WHERE pr.unit_id = un.id) AS pet_count
+    FROM units un ${includeInactive ? '' : "WHERE un.status = 'active'"} ORDER BY un.status, un.name COLLATE NOCASE`).all();
+  const units = rows.results.map(u => isManager
+    ? { ...u, user_count: Number(u.user_count || 0), pet_count: Number(u.pet_count || 0) }
+    : { id: u.id, name: u.name, type: u.type, status: u.status });
+  let unmappedUsers = 0;
+  if (isManager) {
+    const row = await env.DB.prepare(`SELECT COUNT(*) AS count FROM app_users WHERE unit_id IS NULL AND status <> 'disabled' AND role IN ('operacional','verificador')`).first();
+    unmappedUsers = Number(row?.count || 0);
+  }
+  return json({ ok: true, units, unmappedUsers });
+}
+
+/**
+ * O quê: cria unidade, equipe ou núcleo.
+ * Como: gestor/admin; o nome é único sem diferenciar maiúsculas, acentos e espaços repetidos.
+ * Quando: Gestão → Unidades → Nova unidade, ou a partir de um texto antigo no mapeamento.
+ */
+async function createUnit(request, env) {
+  const auth = await requireRole(request, env, ['admin', 'gestor']);
+  const body = await readJson(request);
+  const { name, type } = validateUnitInput(body.name, body.type || 'unidade');
+  const id = crypto.randomUUID();
+  try {
+    await env.DB.prepare(`INSERT INTO units (id, name, name_key, type, status, created_by, created_at) VALUES (?, ?, ?, ?, 'active', ?, ?)`)
+      .bind(id, name, unitNameKey(name), type, auth.user.id, nowIso()).run();
+  } catch (e) {
+    const existing = await env.DB.prepare('SELECT name, status FROM units WHERE name_key = ?').bind(unitNameKey(name)).first();
+    if (existing) throw httpError(409, existing.status === 'active' ? `Já existe a unidade “${existing.name}”.` : `Já existe a unidade “${existing.name}”, desativada. Reative-a em vez de criar outra.`);
+    throw e;
+  }
+  await audit(env, auth.user.id, 'unit_create', 'units', id, 'success', request, { name, type });
+  const unit = await env.DB.prepare('SELECT * FROM units WHERE id = ?').bind(id).first();
+  return json({ ok: true, unit, message: `${unitTypeLabel(type)} “${name}” criada.` }, 201);
+}
+
+/**
+ * O quê: renomeia, muda o tipo, desativa ou reativa uma unidade.
+ * Como: gestor/admin. Desativar exige que nenhum usuário com acesso esteja nela (mova antes).
+ * O nome novo vale para a lista e para novos registros; PETs antigas guardam o nome da época.
+ * Quando: Gestão → Unidades.
+ */
+async function updateUnit(request, env, unitId) {
+  const auth = await requireRole(request, env, ['admin', 'gestor']);
+  const unit = await env.DB.prepare('SELECT * FROM units WHERE id = ?').bind(unitId).first();
+  if (!unit) throw httpError(404, 'Unidade não encontrada.');
+  const body = await readJson(request);
+  const { name, type } = validateUnitInput(body.name ?? unit.name, body.type ?? unit.type);
+  const status = clean(body.status ?? unit.status);
+  if (!['active', 'inactive'].includes(status)) throw httpError(400, 'Situação da unidade inválida.');
+  if (status === 'inactive' && unit.status === 'active') {
+    const row = await env.DB.prepare(`SELECT COUNT(*) AS count FROM app_users WHERE unit_id = ? AND status <> 'disabled'`).bind(unitId).first();
+    const count = Number(row?.count || 0);
+    if (count) throw httpError(409, `Há ${count} ${count === 1 ? 'usuário' : 'usuários'} nesta unidade. Mova ${count === 1 ? 'esse usuário' : 'esses usuários'} para outra unidade antes de desativar.`);
+  }
+  try {
+    await env.DB.prepare('UPDATE units SET name = ?, name_key = ?, type = ?, status = ?, updated_by = ?, updated_at = ? WHERE id = ?')
+      .bind(name, unitNameKey(name), type, status, auth.user.id, nowIso(), unitId).run();
+  } catch (e) {
+    throw httpError(409, 'Já existe outra unidade com esse nome.');
+  }
+  // O texto de compatibilidade dos usuários acompanha o nome oficial.
+  if (name !== unit.name) await env.DB.prepare('UPDATE app_users SET unit = ? WHERE unit_id = ?').bind(name, unitId).run();
+  await audit(env, auth.user.id, 'unit_update', 'units', unitId, 'success', request, { before: { name: unit.name, type: unit.type, status: unit.status }, after: { name, type, status } });
+  const updated = await env.DB.prepare('SELECT * FROM units WHERE id = ?').bind(unitId).first();
+  const message = status !== unit.status ? (status === 'active' ? 'Unidade reativada.' : 'Unidade desativada. O histórico foi mantido.') : 'Unidade atualizada.';
+  return json({ ok: true, unit: updated, message });
+}
+
+/**
+ * O quê: lista os textos de unidade digitados à mão nos cadastros anteriores à v1.3.0.
+ * Como: agrupa usuários ainda sem unidade oficial pelo texto antigo, com a quantidade de usuários e PETs.
+ * Quando: Gestão → Unidades → Cadastros antigos (somente administrador).
+ */
+async function listLegacyUnits(request, env) {
+  await requireRole(request, env, ['admin']);
+  const rows = await env.DB.prepare(`SELECT COALESCE(NULLIF(TRIM(u.unit), ''), '') AS text, COUNT(*) AS user_count,
+      GROUP_CONCAT(u.name, ', ') AS names,
+      (SELECT COUNT(*) FROM pet_records pr JOIN app_users x ON x.id = pr.created_by_user_id
+        WHERE pr.unit_id IS NULL AND x.unit_id IS NULL AND x.status <> 'disabled'
+          AND (x.role IN ('operacional','verificador') OR COALESCE(NULLIF(TRIM(x.unit), ''), '') <> '')
+          AND COALESCE(NULLIF(TRIM(x.unit), ''), '') = COALESCE(NULLIF(TRIM(u.unit), ''), '')) AS pet_count
+    FROM app_users u WHERE u.unit_id IS NULL AND u.status <> 'disabled'
+      AND (u.role IN ('operacional','verificador') OR COALESCE(NULLIF(TRIM(u.unit), ''), '') <> '')
+    GROUP BY COALESCE(NULLIF(TRIM(u.unit), ''), '') ORDER BY text COLLATE NOCASE`).all();
+  return json({ ok: true, items: rows.results.map(r => ({ text: r.text, userCount: Number(r.user_count || 0), petCount: Number(r.pet_count || 0), names: r.names || '' })) });
+}
+
+/**
+ * O quê: liga um texto antigo de unidade a uma unidade oficial.
+ * Como: todos os usuários ainda sem unidade com aquele texto (e as PETs deles) passam para a unidade escolhida.
+ * Texto vazio ("sem unidade informada") também pode ser mapeado.
+ * Quando: uma vez, logo após instalar a v1.3.0.
+ */
+async function mapLegacyUnit(request, env) {
+  const auth = await requireRole(request, env, ['admin']);
+  const body = await readJson(request);
+  const text = clean(body.text) || '';
+  const unit = await env.DB.prepare(`SELECT * FROM units WHERE id = ? AND status = 'active'`).bind(clean(body.unitId)).first();
+  if (!unit) throw httpError(400, 'Escolha uma unidade ativa da lista.');
+  // Gestor/admin sem texto de unidade ficam de fora: para eles, estar sem unidade é normal (empresa toda).
+  const match = `unit_id IS NULL AND status <> 'disabled' AND (role IN ('operacional','verificador') OR COALESCE(NULLIF(TRIM(unit), ''), '') <> '') AND COALESCE(NULLIF(TRIM(unit), ''), '') = ?`;
+  const users = await env.DB.prepare(`SELECT COUNT(*) AS count FROM app_users WHERE ${match}`).bind(text).first();
+  const userCount = Number(users?.count || 0);
+  if (!userCount) throw httpError(404, 'Nenhum usuário pendente com esse texto de unidade.');
+  const results = await env.DB.batch([
+    env.DB.prepare(`UPDATE pet_records SET unit_id = ?, unit_name = ? WHERE unit_id IS NULL AND created_by_user_id IN (SELECT id FROM app_users WHERE ${match})`).bind(unit.id, unit.name, text),
+    env.DB.prepare(`UPDATE app_users SET unit_id = ?, unit = ?, updated_at = ? WHERE ${match}`).bind(unit.id, unit.name, nowIso(), text)
+  ]);
+  const petCount = Number(results?.[0]?.meta?.changes || 0);
+  await audit(env, auth.user.id, 'unit_legacy_map', 'units', unit.id, 'success', request, { text, userCount, petCount });
+  return json({ ok: true, userCount, petCount, message: `${userCount} ${userCount === 1 ? 'usuário passou' : 'usuários passaram'} para “${unit.name}”.` });
+}
+
+/**
+ * Confere a unidade escolhida para um usuário.
+ * Operacional e verificador precisam de unidade; gestor e admin podem ficar sem (empresa toda).
+ * Uma unidade desativada só é aceita se já for a unidade atual do usuário.
+ */
+async function resolveUnitForUser(env, unitId, role, currentUnitId) {
+  if (!unitId) {
+    if (['operacional', 'verificador'].includes(role)) throw httpError(400, 'Escolha a unidade do usuário.');
+    return null;
+  }
+  const unit = await env.DB.prepare('SELECT * FROM units WHERE id = ?').bind(unitId).first();
+  if (!unit) throw httpError(400, 'Unidade não encontrada.');
+  if (unit.status !== 'active' && unit.id !== currentUnitId) throw httpError(400, `A unidade “${unit.name}” está desativada.`);
+  return unit;
+}
+
+/** Valida nome (2 a 80 caracteres) e tipo da unidade. */
+function validateUnitInput(rawName, rawType) {
+  const name = String(rawName ?? '').replace(/\s+/g, ' ').trim();
+  if (name.length < 2) throw httpError(400, 'Informe o nome da unidade.');
+  if (name.length > 80) throw httpError(400, 'O nome da unidade pode ter até 80 caracteres.');
+  const type = clean(rawType);
+  if (!UNIT_TYPES.includes(type)) throw httpError(400, 'Tipo inválido. Use unidade, equipe ou núcleo.');
+  return { name, type };
+}
+
+/** Chave de comparação do nome: sem acentos, minúsculas e espaços simples. */
+function unitNameKey(name) {
+  return String(name || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function unitTypeLabel(type) { return ({ unidade: 'Unidade', equipe: 'Equipe', nucleo: 'Núcleo' }[type] || 'Unidade'); }
+
+/** Gestor e admin veem tudo; verificador só a própria unidade; operacional não consulta registros. */
+function canSeePetDetails(user, record) {
+  if (['admin', 'gestor'].includes(user.role)) return true;
+  if (user.role === 'verificador') return Boolean(user.unitId) && record.unit_id === user.unitId;
+  return false;
 }
 
 /**
@@ -878,15 +1243,15 @@ async function requireAuth(request, env) {
   if (!match) throw httpError(401, 'Sessão ausente. Faça login.');
   const token = match[1].trim();
   const sessionHash = await sha256Hex(`session:${token}:${env.SESSION_SECRET}`);
-  const row = await env.DB.prepare(`SELECT s.*, u.id AS u_id, u.name, u.matricula, u.email, u.role, u.unit, u.status AS user_status, u.must_change_password
-    FROM auth_sessions s JOIN app_users u ON u.id = s.user_id
+  const row = await env.DB.prepare(`SELECT s.*, u.id AS u_id, u.name, u.matricula, u.email, u.role, u.unit, u.unit_id, un.name AS unit_name, u.status AS user_status, u.must_change_password
+    FROM auth_sessions s JOIN app_users u ON u.id = s.user_id LEFT JOIN units un ON un.id = u.unit_id
     WHERE s.session_hash = ? AND s.revoked_at IS NULL`).bind(sessionHash).first();
   if (!row) throw httpError(401, 'Sessão inválida.');
   if (row.expires_at <= nowIso()) throw httpError(401, 'Sessão expirada. Faça login novamente.');
   if (row.user_status !== 'active') throw httpError(403, 'Usuário não está ativo.');
   return {
     session: { id: row.id, expires_at: row.expires_at },
-    user: { id: row.u_id, name: row.name, matricula: row.matricula, email: row.email, role: row.role, unit: row.unit, status: row.user_status, mustChangePassword: Boolean(Number(row.must_change_password || 0)) }
+    user: { id: row.u_id, name: row.name, matricula: row.matricula, email: row.email, role: row.role, unit: row.unit, unitId: row.unit_id || null, unitName: row.unit_name || null, status: row.user_status, mustChangePassword: Boolean(Number(row.must_change_password || 0)) }
   };
 }
 
@@ -903,7 +1268,7 @@ async function requireRole(request, env, roles) {
 
 /** O quê: busca usuário por ID; Como: consulta D1 e retorna 404 se não existir; Quando: edição/reset/exclusão. */
 async function getUserOr404(env, userId) {
-  const user = await env.DB.prepare('SELECT * FROM app_users WHERE id = ?').bind(userId).first();
+  const user = await env.DB.prepare(`${USER_SELECT} WHERE u.id = ?`).bind(userId).first();
   if (!user) throw httpError(404, 'Usuário não encontrado.');
   return user;
 }
@@ -1255,7 +1620,9 @@ function publicPetRecord(row) {
     created_by_user_id: row.created_by_user_id,
     public_key_hash: row.public_key_hash || null,
     idempotency_key: row.idempotency_key || null,
-    participant_count: Number(row.participant_count || 0)
+    participant_count: Number(row.participant_count || 0),
+    unit_id: row.unit_id || null,
+    unit_name: row.unit_name || null
   };
 }
 
@@ -1388,7 +1755,38 @@ function nullableHash(value) { const v = clean(value); if (!v) return null; if (
 /** Exige um SHA-256 hexadecimal. */
 function requiredHash(value, message = 'Hash obrigatório ou inválido.') { const v = clean(value); if (!v || !HASH_RE.test(v)) throw httpError(400, message); return v.toLowerCase(); }
 /** O quê: remove campos sensíveis do usuário; Como: devolve só dados públicos; Quando: respostas de login/cadastro/me. */
-function publicUser(u) { return { id: u.id, name: u.name, matricula: u.matricula, email: u.email || null, role: u.role, unit: u.unit || null, status: u.status || u.user_status || null, mustChangePassword: u.mustChangePassword ?? Boolean(Number(u.must_change_password || 0)), createdAt: u.created_at || null, updatedAt: u.updated_at || null, lastLoginAt: u.last_login_at || null }; }
+function publicUser(u) {
+  const unitId = u.unitId ?? u.unit_id ?? null;
+  const unitName = u.unitName ?? u.unit_name ?? null;
+  return {
+    id: u.id, name: u.name, matricula: u.matricula, email: u.email || null, role: u.role,
+    // `unit` mantém compatibilidade: nome oficial ou, enquanto não mapeado, o texto antigo.
+    unit: unitName || u.unit || null,
+    unitId, unitName,
+    legacyUnit: unitId ? null : (u.unit || null),
+    status: u.status || u.user_status || null,
+    mustChangePassword: u.mustChangePassword ?? Boolean(Number(u.must_change_password || 0)),
+    createdAt: u.created_at || null, updatedAt: u.updated_at || null, lastLoginAt: u.last_login_at || null
+  };
+}
+/** Texto curto opcional, cortado no limite informado. */
+function shortText(value, max) { const v = clean(value); return v ? v.slice(0, max) : null; }
+/** Termo de busca para LIKE, com curingas escapados. Vazio quando não há busca. */
+function searchTerm(value) {
+  const v = clean(value);
+  if (!v) return null;
+  return '%' + v.slice(0, 60).replace(/[\\%_]/g, ch => '\\' + ch) + '%';
+}
+/** Lê `page` e `pageSize` da URL dentro dos limites. */
+function pagination(params) {
+  const pageSize = Math.min(PAGE_SIZE_MAX, Math.max(1, Number.parseInt(params.get('pageSize') || PAGE_SIZE_DEFAULT, 10) || PAGE_SIZE_DEFAULT));
+  const page = Math.max(1, Number.parseInt(params.get('page') || '1', 10) || 1);
+  return { page, pageSize, offset: (page - 1) * pageSize };
+}
+/** Data no formato dd/mm/aaaa (horário de Brasília) para mensagens. */
+function formatBrDate(iso) {
+  try { return new Date(iso).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }); } catch { return String(iso).slice(0, 10); }
+}
 /** O quê: identifica IP do cliente; Como: lê CF-Connecting-IP ou x-forwarded-for; Quando: auditoria e registro de PET. */
 function clientIp(request) { return request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || ''; }
 

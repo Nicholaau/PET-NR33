@@ -1,5 +1,5 @@
 /**
- * PET-Digital v1.2.0 — prepara o frontend do ambiente de homologação.
+ * PET-Digital v1.3.0 — prepara o frontend do ambiente de homologação.
  *
  * O quê: copia `frontend/` para `frontend-homologacao/`, trocando o endereço da API e
  *        acrescentando uma faixa "HOMOLOGAÇÃO" no topo, para ninguém confundir com a produção.

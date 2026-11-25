@@ -1,8 +1,9 @@
 <!doctype html>
 <!--
-  PET-Digital NR-33 v1.2.0 — estrutura visual do aplicativo.
-  O quê: telas de login, preenchimento em etapas, equipe, revisão, conclusão, Minhas PETs, Conta e Gestão.
-  Como: o comportamento fica em quatro arquivos JavaScript (núcleo, sistema, formulário e saída); a API fica no Worker.
+  PET-Digital NR-33 v1.3.0 — estrutura visual do aplicativo.
+  O quê: telas de login, preenchimento em etapas, equipe, revisão, conclusão, Minhas PETs, Aparelhos, Gestão e Conta.
+  Como: o comportamento fica em cinco arquivos JavaScript (núcleo, sistema, gestão, formulário e saída); a API fica no Worker.
+  v1.3.0: aba Aparelhos (gestor/admin), aviso de pedidos pendentes, unidades padronizadas e PETs registradas por unidade.
   Quando: carregado pelo Cloudflare Pages e mantido offline pelo Service Worker.
   Observação: a CSP não permite estilos inline; toda a aparência está em styles.css.
   A proteção contra exibição em outros sites (frame-ancestors) fica no arquivo _headers.
@@ -67,10 +68,15 @@
   </header>
   <nav id="appTabs" class="tabs hidden" aria-label="Seções do aplicativo">
     <button type="button" class="tab-btn active" data-tab="formTab" aria-current="page">Nova PET</button>
-    <button type="button" class="tab-btn" data-tab="recordsTab">Minhas PETs</button>
+    <button type="button" class="tab-btn" data-tab="recordsTab"><span class="tab-long">Minhas PETs</span><span class="tab-short">Minhas</span></button>
+    <button type="button" class="tab-btn hidden" id="devicesTabBtn" data-tab="devicesTab">Aparelhos<span id="devicesBadge" class="badge hidden">0</span></button>
+    <button type="button" class="tab-btn hidden" id="manageTabBtn" data-tab="manageTab"><span id="manageTabLabel">Gestão</span></button>
     <button type="button" class="tab-btn" data-tab="accountTab">Conta</button>
-    <button type="button" class="tab-btn hidden" id="manageTabBtn" data-tab="manageTab">Gestão<span id="manageBadge" class="badge hidden">0</span></button>
   </nav>
+  <div id="pendingDevicesBanner" class="banner banner-attn hidden" role="status">
+    <span id="pendingDevicesText"></span>
+    <button type="button" id="pendingDevicesGo" class="btn small primary">Ver agora</button>
+  </div>
   <div id="offlineBanner" class="banner banner-warn hidden" role="status">Sem conexão. O preenchimento continua; a emissão oficial exige internet.</div>
   <div id="updateBanner" class="banner banner-info hidden" role="status">
     <span>Nova versão disponível.</span>
@@ -118,7 +124,8 @@
           <section class="form-step" data-form-step="1">
             <div class="card stack">
               <label class="field">Nome da unidade
-                <input name="unidade" required placeholder="Ex.: DMAE — Manutenção de Esgoto" />
+                <input name="unidade" id="petUnidadeInput" required placeholder="Ex.: DMAE — Manutenção de Esgoto" />
+                <span id="petUnidadeHint" class="field-hint hidden">Preenchido pela unidade do seu cadastro.</span>
               </label>
               <label class="field">Local do espaço confinado
                 <input name="local" required placeholder="Endereço, PV, reservatório, elevatória" />
@@ -376,44 +383,117 @@
       <button type="button" id="logoutBtn" class="btn danger-outline block">Sair do sistema</button>
     </section>
 
-    <!-- ===================== GESTÃO ===================== -->
+    <!-- ===================== APARELHOS (gestor/admin) ===================== -->
+    <section id="devicesTab" class="tab">
+      <div class="row-between"><h2 class="page-title">Aparelhos</h2><button type="button" id="devicesRefreshBtn" class="link">Atualizar</button></div>
+      <div class="filter-tiles" id="deviceFilter" role="group" aria-label="Situação dos aparelhos">
+        <button type="button" class="filter-tile active" data-device-filter="pending" aria-pressed="true"><b data-device-count="pending">0</b><span>Pendentes</span></button>
+        <button type="button" class="filter-tile" data-device-filter="active" aria-pressed="false"><b data-device-count="active">0</b><span>Ativos</span></button>
+        <button type="button" class="filter-tile" data-device-filter="revoked" aria-pressed="false"><b data-device-count="revoked">0</b><span>Revogados</span></button>
+        <button type="button" class="filter-tile" data-device-filter="inactive" aria-pressed="false"><b data-device-count="inactive">0</b><span>Sem uso</span></button>
+      </div>
+      <label class="field"><span class="visually-hidden">Buscar aparelho</span>
+        <input id="deviceSearch" type="search" placeholder="Buscar por nome, matrícula ou aparelho" autocomplete="off" />
+      </label>
+      <p id="deviceFilterHint" class="hint"></p>
+      <div id="devicesList" class="stack"></div>
+      <div id="devicesPager" class="pager hidden">
+        <button type="button" id="devicesPrev" class="btn secondary small">Anterior</button>
+        <span id="devicesPageLabel" class="muted small-text"></span>
+        <button type="button" id="devicesNext" class="btn secondary small">Próxima</button>
+      </div>
+    </section>
+
+    <!-- ===================== GESTÃO / CONFERÊNCIA ===================== -->
     <section id="manageTab" class="tab">
-      <h2 class="page-title">Gestão</h2>
+      <h2 class="page-title" id="manageTitle">Gestão</h2>
 
-      <div id="teamDevicesSection" class="card stack hidden">
-        <div class="row-between"><h3>Aparelhos da equipe</h3><span id="devicesCount" class="count-pill hidden"></span></div>
-        <p class="hint">Solicitações pendentes aparecem primeiro. Ao aprovar, o servidor já pode emitir PETs naquele aparelho.</p>
-        <div id="devicesList" class="stack"></div>
+      <div class="segmented seg-tabs hidden" id="manageSections" role="tablist" aria-label="Áreas da gestão">
+        <button type="button" class="seg-btn active" data-manage-section="pets" role="tab" aria-selected="true">PETs</button>
+        <button type="button" class="seg-btn" data-manage-section="users" role="tab" aria-selected="false">Usuários</button>
+        <button type="button" class="seg-btn" data-manage-section="units" role="tab" aria-selected="false">Unidades</button>
       </div>
 
-      <div id="userManagementSection" class="card stack hidden">
-        <div class="row-between"><h3>Usuários</h3><button type="button" id="newUserToggle" class="link" aria-expanded="false" aria-controls="newUserPanel">+ Cadastrar</button></div>
-        <div id="newUserPanel" class="stack hidden">
-          <label class="field">Nome<input id="newUserName" placeholder="Nome completo" /></label>
-          <label class="field">Matrícula<input id="newUserMatricula" inputmode="numeric" /></label>
-          <label class="field">E-mail<input id="newUserEmail" type="email" placeholder="Opcional" /></label>
-          <label class="field">Perfil<select id="newUserRole"></select></label>
-          <label class="field">Unidade<input id="newUserUnit" placeholder="Setor ou unidade" /></label>
-          <label class="field">Senha temporária<input id="newUserPassword" type="password" autocomplete="new-password" placeholder="Mínimo de 8 caracteres" /></label>
-          <button type="button" id="createUserBtn" class="btn primary block">Cadastrar usuário</button>
+      <!-- PETs registradas + validação -->
+      <div id="managePets" class="stack manage-section">
+        <div class="card stack">
+          <div class="row-between"><h3 id="petListTitle">PETs registradas</h3><span id="petListCount" class="muted small-text"></span></div>
+          <p id="petListScope" class="hint"></p>
+          <label class="field" id="petUnitFilterField">Unidade
+            <select id="petUnitFilter"></select>
+          </label>
+          <label class="field"><span class="visually-hidden">Buscar PET</span>
+            <input id="petSearch" type="search" placeholder="Número, local, emissor ou supervisor" autocomplete="off" />
+          </label>
+          <div id="petList" class="stack"></div>
+          <div id="petPager" class="pager hidden">
+            <button type="button" id="petPrev" class="btn secondary small">Anterior</button>
+            <span id="petPageLabel" class="muted small-text"></span>
+            <button type="button" id="petNext" class="btn secondary small">Próxima</button>
+          </div>
         </div>
-        <div id="usersList" class="stack"></div>
+
+        <div id="verifySection" class="card stack">
+          <h3>Validar uma PET recebida</h3>
+          <p class="hint">Selecione o PDF e o arquivo de validação que você recebeu. O sistema confere os dois arquivos e o registro no servidor.</p>
+          <label class="field">PDF da PET<input type="file" id="verifyPdfFile" accept="application/pdf,.pdf" /></label>
+          <label class="field">Arquivo de validação (JSON)<input type="file" id="verifyJsonFile" accept="application/json,.json" /></label>
+          <button type="button" id="verifyFilesBtn" class="btn primary block">Validar documento</button>
+          <div id="verifyResult" class="alert hidden"></div>
+        </div>
+
+        <details class="card details">
+          <summary>Consultar código de conferência</summary>
+          <div class="stack">
+            <label class="field">Código técnico (64 caracteres)<input id="serverHashInput" autocomplete="off" /></label>
+            <button type="button" id="serverValidateBtn" class="btn secondary block">Consultar registro</button>
+            <div id="serverValidateResult" class="alert hidden"></div>
+          </div>
+        </details>
       </div>
 
-      <div id="verifySection" class="card stack">
-        <h3>Validar uma PET recebida</h3>
-        <p class="hint">Selecione o PDF e o arquivo de validação que você recebeu. O sistema confere os dois arquivos e o registro no servidor.</p>
-        <label class="field">PDF da PET<input type="file" id="verifyPdfFile" accept="application/pdf,.pdf" /></label>
-        <label class="field">Arquivo de validação (JSON)<input type="file" id="verifyJsonFile" accept="application/json,.json" /></label>
-        <button type="button" id="verifyFilesBtn" class="btn primary block">Validar documento</button>
-        <div id="verifyResult" class="alert hidden"></div>
+      <!-- Usuários -->
+      <div id="manageUsers" class="stack manage-section hidden">
+        <div id="unmappedUsersNotice" class="alert alert-warn hidden" role="status"></div>
+        <div id="userManagementSection" class="card stack">
+          <div class="row-between"><h3>Usuários</h3><button type="button" id="newUserToggle" class="link" aria-expanded="false" aria-controls="newUserPanel">+ Cadastrar</button></div>
+          <div id="newUserPanel" class="stack hidden">
+            <label class="field">Nome<input id="newUserName" placeholder="Nome completo" /></label>
+            <label class="field">Matrícula<input id="newUserMatricula" inputmode="numeric" /></label>
+            <label class="field">E-mail<input id="newUserEmail" type="email" placeholder="Opcional" /></label>
+            <label class="field">Perfil<select id="newUserRole"></select></label>
+            <label class="field">Unidade<select id="newUserUnitId"></select></label>
+            <label class="field">Senha temporária<input id="newUserPassword" type="password" autocomplete="new-password" placeholder="Mínimo de 8 caracteres" /></label>
+            <button type="button" id="createUserBtn" class="btn primary block">Cadastrar usuário</button>
+          </div>
+          <label class="field"><span class="visually-hidden">Buscar usuário</span><input id="userSearch" type="search" placeholder="Buscar por nome ou matrícula" autocomplete="off" /></label>
+          <label class="field"><span class="visually-hidden">Filtrar por unidade</span><select id="userUnitFilter"></select></label>
+          <span id="usersCount" class="muted small-text"></span>
+          <div id="usersList" class="stack"></div>
+        </div>
       </div>
 
-      <div class="card stack">
-        <h3>Consultar código de conferência</h3>
-        <label class="field">Código técnico (64 caracteres)<input id="serverHashInput" autocomplete="off" /></label>
-        <button type="button" id="serverValidateBtn" class="btn secondary block">Consultar registro</button>
-        <div id="serverValidateResult" class="alert hidden"></div>
+      <!-- Unidades -->
+      <div id="manageUnits" class="stack manage-section hidden">
+        <div id="legacyUnitsCard" class="card stack hidden">
+          <h3>Cadastros antigos</h3>
+          <p class="hint">Antes da padronização, a unidade era digitada à mão. Ligue cada texto abaixo a uma unidade da lista: os usuários e as PETs deles passam para ela.</p>
+          <div id="legacyUnitsList" class="stack"></div>
+        </div>
+        <div class="card stack">
+          <div class="row-between"><h3>Unidades, equipes e núcleos</h3><button type="button" id="newUnitToggle" class="link" aria-expanded="false" aria-controls="newUnitPanel">+ Nova</button></div>
+          <div id="newUnitPanel" class="stack hidden">
+            <label class="field">Nome<input id="newUnitName" maxlength="80" placeholder="Ex.: Manutenção de Esgoto" autocomplete="off" /></label>
+            <div class="segmented" id="newUnitType" role="radiogroup" aria-label="Tipo">
+              <label><input type="radio" name="newUnitType" value="unidade" checked /><span>Unidade</span></label>
+              <label><input type="radio" name="newUnitType" value="equipe" /><span>Equipe</span></label>
+              <label><input type="radio" name="newUnitType" value="nucleo" /><span>Núcleo</span></label>
+            </div>
+            <button type="button" id="createUnitBtn" class="btn primary block">Criar</button>
+          </div>
+          <label class="check-row"><input type="checkbox" id="showInactiveUnits" /> Mostrar desativadas</label>
+          <div id="unitsList" class="stack"></div>
+        </div>
       </div>
     </section>
   </main>
@@ -467,7 +547,7 @@
       <label class="field">Nome<input id="editUserName" required /></label>
       <label class="field">Matrícula<input id="editUserMatricula" required /></label>
       <label class="field">E-mail<input id="editUserEmail" type="email" /></label>
-      <label class="field">Unidade<input id="editUserUnit" /></label>
+      <label class="field">Unidade<select id="editUserUnitId"></select></label>
       <label class="field">Perfil<select id="editUserRole"></select></label>
       <label class="field">Situação
         <select id="editUserStatus">
@@ -500,8 +580,44 @@
     </form>
   </dialog>
 
+  <!-- Recusar pedido ou revogar aparelho (v1.3.0) -->
+  <dialog id="deviceActionDialog" class="app-dialog">
+    <form method="dialog" class="stack">
+      <h2 id="deviceActionTitle">Revogar aparelho</h2>
+      <p id="deviceActionWho" class="hint"></p>
+      <fieldset class="reason-list" id="deviceActionReasons"><legend class="field-legend">Motivo</legend></fieldset>
+      <label class="field hidden" id="deviceActionOtherField">Descreva o motivo<input id="deviceActionOther" maxlength="160" autocomplete="off" /></label>
+      <div class="two-cols">
+        <button type="button" class="btn secondary" data-close-dialog="deviceActionDialog">Cancelar</button>
+        <button type="button" id="deviceActionConfirm" class="btn danger">Revogar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Editar unidade (v1.3.0) -->
+  <dialog id="unitEditDialog" class="app-dialog">
+    <form method="dialog" class="stack">
+      <h2>Editar unidade</h2>
+      <input type="hidden" id="unitEditId" />
+      <label class="field">Nome<input id="unitEditName" maxlength="80" autocomplete="off" /></label>
+      <label class="field">Tipo
+        <select id="unitEditType">
+          <option value="unidade">Unidade</option>
+          <option value="equipe">Equipe</option>
+          <option value="nucleo">Núcleo</option>
+        </select>
+      </label>
+      <p class="hint">O novo nome vale daqui em diante. As PETs já emitidas mantêm o nome da época.</p>
+      <div class="two-cols">
+        <button type="button" class="btn secondary" data-close-dialog="unitEditDialog">Cancelar</button>
+        <button type="button" id="unitEditSave" class="btn primary">Salvar</button>
+      </div>
+    </form>
+  </dialog>
+
   <script defer src="app-core.js"></script>
   <script defer src="app-system.js"></script>
+  <script defer src="app-gestao.js"></script>
   <script defer src="app-form.js"></script>
   <script defer src="app-output.js"></script>
 </body>
