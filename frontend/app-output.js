@@ -111,8 +111,11 @@ async function shareJsonRecord(record, triggerButton) {
   const original = button?.textContent || '';
   try {
     if (button) { button.disabled = true; button.textContent = 'Compartilhando...'; }
-    const file = new File([files.jsonText], files.jsonFilename || jsonFilename(record), { type: 'application/json' });
-    await shareFilesOrDownload([file], 'Arquivo de validação PET Digital NR-33', `Arquivo de validação da ${record.payload?.fields?.petNumero || record.recordId}.`);
+    // v1.3.1: o Chrome do Android recusa compartilhar .json ("Permission denied"). O arquivo vai como .txt,
+    // com o conteúdo idêntico (o hash é do conteúdo, não do nome), e a validação aceita os dois formatos.
+    const file = new File([files.jsonText], shareableJsonFilename(record, files), { type: 'text/plain' });
+    const original = new File([files.jsonText], files.jsonFilename || jsonFilename(record), { type: 'application/json' });
+    await shareFilesOrDownload([file], 'Arquivo de validação PET Digital NR-33', `Arquivo de validação da ${record.payload?.fields?.petNumero || record.recordId}.`, [original]);
   } catch (err) { if (err.name !== 'AbortError') notify('Não foi possível compartilhar: ' + err.message, 'bad'); }
   finally { if (button) { button.disabled = false; button.textContent = original || 'Enviar arquivo de validação'; } }
 }
@@ -848,6 +851,8 @@ function pdfFilename(record) { return `${recordFileStem(record)}.pdf`; }
 
 /** Retorna o nome sugerido para o arquivo de validação da PET (JSON). */
 function jsonFilename(record) { return `${recordFileStem(record)}_validacao.json`; }
+/** Nome usado no compartilhamento: mesmo nome, terminado em .txt (aceito pelo Android). */
+function shareableJsonFilename(record, files) { return (files?.jsonFilename || jsonFilename(record)).replace(/\.json$/i, '') + '.txt'; }
 
 /**
  * Força o download de um objeto como arquivo JSON.
@@ -877,12 +882,20 @@ function downloadBlob(blob, filename) {
  * O que faz: tenta abrir a folha nativa de compartilhamento do celular; quando o navegador
  * não suporta arquivos, salva os arquivos localmente para o usuário encaminhar manualmente.
  */
-async function shareFilesOrDownload(files, title, text) {
+async function shareFilesOrDownload(files, title, text, downloadFiles = files) {
   if (navigator.share && navigator.canShare && navigator.canShare({ files })) {
-    await navigator.share({ files, title, text });
-    return;
+    try {
+      await navigator.share({ files, title, text });
+      return;
+    } catch (err) {
+      // Cancelado pelo usuário: nada a fazer. Recusado pelo celular: salva o arquivo para anexar à mão.
+      if (err.name !== 'NotAllowedError') throw err;
+      downloadFiles.forEach(file => downloadBlob(file, file.name));
+      notify('O celular não liberou o compartilhamento. O arquivo foi salvo em Downloads para você anexar manualmente.', 'info', 7000);
+      return;
+    }
   }
-  files.forEach(file => downloadBlob(file, file.name));
+  downloadFiles.forEach(file => downloadBlob(file, file.name));
   notify('Este navegador não permite compartilhar arquivos diretamente. O arquivo foi baixado para envio manual.', 'info', 6000);
 }
 

@@ -41,6 +41,13 @@ Nenhum erro de JavaScript registrado durante os cenários.
 - Abas de gestor/admin conferidas em 360, 390 e 412 px de largura, sem rolagem lateral.
 - Aba Aparelhos conferida em computador (1280 px), com aviso de aparelho ativo e os três botões.
 
+## v1.3.1
+
+- Compartilhamento simulando a regra do Chrome do Android: `.json` recusado com “Permission denied”; o app envia `..._validacao.txt`, `text/plain`, com conteúdo idêntico ao registrado.
+- O `.txt` compartilhado, usado na validação junto com o PDF: “Documento válido”.
+- Celular recusando o compartilhamento: o `.json` é salvo e aparece o aviso “salvo em Downloads”.
+- Suíte completa: 27 aprovados, 0 falhas.
+
 ## Não coberto pelos testes automáticos
 
 - Mapeamento dos cadastros antigos com os dados reais da produção (testado com dados simulados).

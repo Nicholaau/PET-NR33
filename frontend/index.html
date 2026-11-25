@@ -437,7 +437,7 @@
           <h3>Validar uma PET recebida</h3>
           <p class="hint">Selecione o PDF e o arquivo de validação que você recebeu. O sistema confere os dois arquivos e o registro no servidor.</p>
           <label class="field">PDF da PET<input type="file" id="verifyPdfFile" accept="application/pdf,.pdf" /></label>
-          <label class="field">Arquivo de validação (JSON)<input type="file" id="verifyJsonFile" accept="application/json,.json" /></label>
+          <label class="field">Arquivo de validação (.json ou .txt)<input type="file" id="verifyJsonFile" accept="application/json,text/plain,.json,.txt" /></label>
           <button type="button" id="verifyFilesBtn" class="btn primary block">Validar documento</button>
           <div id="verifyResult" class="alert hidden"></div>
         </div>

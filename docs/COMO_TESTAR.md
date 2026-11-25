@@ -34,7 +34,7 @@ npm run test:api    # só regras do Worker (segundos)
 npm run test:app    # só o aplicativo no navegador
 ```
 
-Resultado esperado: `pass 27` e `fail 0`. Qualquer `fail` mostra o teste e a linha que falhou.
+Resultado esperado: `pass 27` e `fail 0`. O cenário 3 a 6 inclui, desde a v1.3.1, o compartilhamento com a regra do Chrome do Android (recusa `.json`). Qualquer `fail` mostra o teste e a linha que falhou.
 
 Para guardar capturas de tela de cada passo: `PET_SCREENSHOTS=capturas npm run test:app` (Linux/Mac) ou `set PET_SCREENSHOTS=capturas && npm run test:app` (Windows).
 
@@ -136,7 +136,8 @@ Marque cada item em pelo menos um Android e, se a equipe usar, um iPhone.
 | 11 | Assinatura em tela cheia, celular deitado | Traço sem distorção; “Assinado” na lista |
 | 12 | Revisão | Itens NÃO e N/A em destaque; “Corrigir” leva à etapa |
 | 13 | Finalizar com internet boa | Tela “PET registrada” com número |
-| 14 | Enviar PDF e arquivo de validação por WhatsApp/e-mail | Os dois chegam e abrem |
+| 14 | Enviar PDF e arquivo de validação por WhatsApp/e-mail | Os dois chegam; o arquivo de validação chega como `..._validacao.txt` |
+| 14a | Validar com o `.txt` recebido no item 14 | “Documento válido” |
 | 15 | Abrir o PDF | Página 2 mostra detector, justificativas N/A e declaração de ciência |
 | 16 | Modo avião logo antes de tocar “Finalizar PET” | “Envio pendente”; ao voltar a internet, “Repetir envio” registra **o mesmo número** |
 | 17 | Com envio pendente, fechar e abrir o app | O envio pendente continua lá |

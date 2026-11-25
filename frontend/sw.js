@@ -5,6 +5,7 @@
  * Como: usa uma lista fechada; nunca intercepta API, Authorization, CDN, sessão ou IP.
  * Quando: instalado/atualizado ao acessar o Cloudflare Pages.
  *
+ * v1.3.1: arquivo de validação compartilhado como .txt (Chrome do Android recusa .json).
  * v1.3.0: novo nome de cache e o módulo app-gestao.js.
  * v1.2.0: novo nome de cache, para que os celulares baixem a nova interface.
  * v1.1.6:
@@ -13,7 +14,7 @@
  * - não armazena bibliotecas externas nem respostas autenticadas.
  */
 
-const CACHE_NAME = 'pet-digital-static-v1.3.0';
+const CACHE_NAME = 'pet-digital-static-v1.3.1';
 const APP_SHELL = [
   './',
   './index.html',

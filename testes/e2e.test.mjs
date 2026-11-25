@@ -22,6 +22,8 @@
  * 12. Operacional emite PET; verificador da mesma unidade vê só ela na Conferência; PET de fora da
  *     unidade é confirmada como autêntica, sem detalhes.
  * 13. Aba Aparelhos: filtros com contadores e revogação com motivo.
+ * v1.3.1 (no cenário 3 a 6): compartilhamento do arquivo de validação com a regra do Chrome do Android
+ *     (recusa .json); o .txt compartilhado valida normalmente; recusa do celular salva o arquivo.
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -247,6 +249,39 @@ test('3 a 6. emissão completa com medição fora do limite, PDF e validação',
   await page.click('#verifyFilesBtn');
   await page.waitForSelector('#verifyResult.alert-ok', { timeout: 30000 });
   assert.match(await page.textContent('#verifyResult'), /Documento válido/);
+
+  // v1.3.1: simula o Chrome do Android, que recusa compartilhar .json com "Permission denied".
+  await page.evaluate(() => {
+    const allowed = f => !/\.json$/i.test(f.name) && f.type !== 'application/json';
+    navigator.canShare = () => true;
+    navigator.share = async ({ files }) => {
+      if (!files.every(allowed)) throw new DOMException('Permission denied', 'NotAllowedError');
+      window.__shared = { name: files[0].name, type: files[0].type, text: await files[0].text() };
+    };
+  });
+  await page.click('[data-tab="recordsTab"]');
+  await page.click('[data-record-action="shareJson"][data-index="0"]');
+  await page.waitForFunction(() => window.__shared);
+  const shared = await page.evaluate(() => window.__shared);
+  assert.match(shared.name, /_validacao\.txt$/);
+  assert.equal(shared.type, 'text/plain');
+  assert.equal(shared.text, await readFile(jsonPath, 'utf8'), 'conteúdo idêntico ao registrado');
+  const txtPath = jsonPath + '.txt';
+  await (await import('node:fs/promises')).writeFile(txtPath, shared.text);
+  await page.click('#manageTabBtn');
+  await page.setInputFiles('#verifyPdfFile', pdfPath);
+  await page.setInputFiles('#verifyJsonFile', txtPath);
+  await page.click('#verifyFilesBtn');
+  await page.waitForSelector('#verifyResult.alert-ok', { timeout: 30000 });
+  assert.match(await page.textContent('#verifyResult'), /Documento válido/, '.txt compartilhado valida');
+  // Se o celular recusar mesmo assim, o arquivo original (.json) é salvo para anexar à mão.
+  await page.evaluate(() => { navigator.share = async () => { throw new DOMException('Permission denied', 'NotAllowedError'); }; });
+  await page.click('[data-tab="recordsTab"]');
+  const [fallback] = await waitDownloads(() => page.click('[data-record-action="shareJson"][data-index="0"]'), 1);
+  assert.match(fallback.suggestedFilename(), /_validacao\.json$/);
+  await page.waitForFunction(() => /salvo em Downloads/.test(document.querySelector('#toast').textContent));
+  await page.evaluate(() => { delete navigator.share; delete navigator.canShare; });
+  await page.click('#manageTabBtn');
 
   // v1.3.0: a PET aparece na lista de PETs registradas com data e local gravados no servidor.
   await page.waitForSelector(`#petList .list-card:has-text("${numero}")`);

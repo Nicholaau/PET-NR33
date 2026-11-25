@@ -25,7 +25,7 @@
  */
 
 // Versão funcional gravada no dossiê e exibida nos elementos de prova.
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 
 // Perfil técnico aceito pelo próprio validador. Esses valores padronizam como o hash
 // é calculado, qual algoritmo assina o registro e como outro validador deve conferir.

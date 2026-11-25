@@ -1,4 +1,18 @@
-# Alterações — v1.3.0
+# Alterações — v1.3.0 e v1.3.1
+
+## v1.3.1 — correção do envio do arquivo de validação
+
+**Problema:** no Android, “Enviar arquivo de validação” mostrava “Não foi possível compartilhar: Permission denied”. O Chrome do Android só compartilha alguns tipos de arquivo (PDF, imagens, `.txt` e poucos outros) e recusa `.json`.
+
+**Correção:**
+- No compartilhamento, o arquivo de validação vai como `..._validacao.txt`. O conteúdo é exatamente o mesmo; o hash registrado é do conteúdo, não do nome.
+- A validação (Gestão/Conferência) aceita o arquivo de validação em `.json` ou `.txt`.
+- “Baixar” continua gerando `.json`.
+- Se o celular recusar o compartilhamento por outro motivo, o app salva o arquivo em Downloads e avisa, em vez de só mostrar o erro.
+
+**Publicação:** só o Pages (`frontend/`). Worker e banco não mudam; `/health` continua `1.3.0`. Em Conta, o app mostra 1.3.1.
+
+---
 
 Foco: autorização de aparelhos mais clara e separação por unidade.
 

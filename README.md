@@ -1,9 +1,11 @@
-# PET-Digital NR-33 v1.3.0 — Cloudflare comentado
+# PET-Digital NR-33 v1.3.1 — Cloudflare comentado
 
 Permissão de Entrada e Trabalho em espaço confinado, digital, com assinatura, foto, geolocalização e validação por PDF + arquivo de validação (JSON).
 
 A v1.3.0 reorganiza a **autorização de aparelhos** e cria a **separação por unidade**, com a lista oficial de unidades no banco e as permissões de cada perfil aplicadas no Worker.
 
+> **v1.3.1:** corrige o “Permission denied” ao enviar o arquivo de validação no Android (ver `docs/ALTERACOES_v130.md`). Se a v1.3.0 já está publicada, basta publicar de novo o `frontend/`.
+>
 > **Tem migration nova:** `migrations/0005_unidades_v130.sql`. Ordem de publicação: **banco → Worker → Pages** (ver “Instalação”).
 
 ---
@@ -81,7 +83,7 @@ Servidor local, sem Cloudflare: `node testes/servidor-local.mjs` e abra `http://
 ## 5. Estrutura
 
 ```text
-pet-digital-v1.3.0/
+pet-digital-v1.3.1/
 ├── frontend/                 → publicar no Cloudflare Pages
 │   ├── index.html            telas
 │   ├── styles.css            aparência
